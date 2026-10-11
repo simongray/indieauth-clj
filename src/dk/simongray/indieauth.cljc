@@ -5,14 +5,15 @@
 
   The code follows the IndieAuth Living Standard of 11 July 2024 at
   https://indieauth.spec.indieweb.org/ and cites its sections. The server
-  is in dk.simongray.indieauth.server, and the checks of a resource server
-  in dk.simongray.indieauth.resource.
+  is in dk.simongray.indieauth.server, the checks of a resource server in
+  dk.simongray.indieauth.resource, and the signed maps that carry a value
+  through a browser in dk.simongray.indieauth.signed.
 
-  The other namespaces under dk.simongray.indieauth hold what these three
+  The other namespaces under dk.simongray.indieauth hold what these four
   are made of: identifier the parts of URLs, fetch the requests of a
-  client, state the state of a sign-in, links the links of a page, signed
-  the signed texts, ring the Ring requests and answers, and bytes, json
-  and instant the values of both platforms."
+  client, state the state of a sign-in, links the links of a page, ring
+  the Ring requests and answers, and bytes, json and instant the values
+  of both platforms."
   (:require [clojure.string :as str]
             [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.fetch :as fetch]
@@ -357,6 +358,8 @@
     the answer has the user's profile URL alone.
   - :secret, a text of 32 bytes or more, e.g. a token, to sign the session
     into the state, so that state-session gets it back from the state
+  - :data, any EDN that the session carries for you, e.g. the request of
+    an IndieAuth server that the user signs in for
   - :now-fn, as default-options has it
 
   Keep the session where the browser's next request finds it, e.g. in a
@@ -366,7 +369,7 @@
   that asks for an access token needs a token endpoint, and a server
   without one gives a map of the :error."
   [{:keys [me authorization-endpoint token-endpoint] :as discovery}
-   {:keys [client-id redirect-uri scope secret] :as opts}]
+   {:keys [client-id redirect-uri scope secret data] :as opts}]
   (let [{:keys [now-fn]} (merge default-options opts)
         asked            (scopes scope)]
     (when-let [problem (request-problem client-id redirect-uri asked)]
@@ -377,14 +380,15 @@
       (fetch/failure ::no-token-endpoint
                      "The server has no token endpoint to give an access token"
                      {:url authorization-endpoint})
-      (let [session (merge (select-keys discovery [:me :urls :issuer
-                                                   :authorization-endpoint
-                                                   :token-endpoint
-                                                   :revocation-endpoint
-                                                   :userinfo-endpoint])
-                           {:client-id    client-id
-                            :redirect-uri redirect-uri
-                            :scope        (scope-text asked)})
+      (let [session (cond-> (merge (select-keys discovery [:me :urls :issuer
+                                                           :authorization-endpoint
+                                                           :token-endpoint
+                                                           :revocation-endpoint
+                                                           :userinfo-endpoint])
+                                   {:client-id    client-id
+                                    :redirect-uri redirect-uri
+                                    :scope        (scope-text asked)})
+                      (some? data) (assoc :data data))
             {:keys [state code-verifier] :as fresh} (state/fresh session secret (now-fn))]
         {:url     (url/with-query authorization-endpoint
                     [["response_type" "code"]

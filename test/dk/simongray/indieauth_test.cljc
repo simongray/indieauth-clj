@@ -335,7 +335,17 @@
       (is (nil? (indieauth/state-session secret-text state nonce {:now-fn (constantly #inst "2026-10-11T12:11:00Z")})))
       (is (nil? (indieauth/state-session (str secret-text "!") state nonce {:now-fn (constantly noon)}))))
     (testing "a session without a secret has no nonce"
-      (is (nil? (:nonce (:session (indieauth/authorization-request discovery client))))))))
+      (is (nil? (:nonce (:session (indieauth/authorization-request discovery client))))))
+    (testing ":data, which the session carries, also in a signed state"
+      (let [data                  {:request "a request of the app's own server"}
+            {:keys [url session]} (indieauth/authorization-request discovery (assoc client
+                                                                                    :data data
+                                                                                    :secret secret-text
+                                                                                    :now-fn (constantly noon)))]
+        (is (= data (:data session)))
+        (is (= data (:data (indieauth/state-session secret-text (get (t/query url) "state") (:nonce session) later)))))
+      (is (not (contains? (:session (indieauth/authorization-request discovery (assoc client :data nil))) :data))
+          "and nil is left out"))))
 
 (def session
   (assoc discovery
