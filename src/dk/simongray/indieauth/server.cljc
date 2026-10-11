@@ -19,13 +19,13 @@
             [dk.simongray.indieauth.identifier :as identifier]
             [dk.simongray.indieauth.info :as info]
             [dk.simongray.indieauth.instant :as instant]
-            [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.indieauth.signed :as signed]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
+            [dk.simongray.wary-fetch.json :as json]
             [dk.simongray.wary-fetch.url :as url]))
 
 (def default-options
@@ -139,7 +139,7 @@
   [client-id {:keys [headers body] :as response}]
   (let [type (headers/media-type (headers/header headers "content-type"))
         m    (when (or (nil? type) (re-find #"^application/(.+\+)?json$" type))
-               (json/read-object body))]
+               (fetch/json-object body))]
     (cond
       m
       (or (info/document-info client-id m) (info/unknown-client client-id))

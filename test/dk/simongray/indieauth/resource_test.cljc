@@ -5,11 +5,11 @@
   the server's tests."
   (:require [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth.digest :as digest]
-            [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.server :as server]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
-            [dk.simongray.wary-fetch.async :as async]))
+            [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.json :as json]))
 
 (def noon #inst "2026-10-11T12:00:00Z")
 
@@ -37,7 +37,7 @@
   (testing "RFC 6750, section 3"
     (let [r (resource/problem-response (resource/access-problem info ["delete"]))]
       (is (= "Bearer error=\"insufficient_scope\", scope=\"delete\"" (get-in r [:headers "WWW-Authenticate"])))
-      (is (= "insufficient_scope" (:error (json/read-object (:body r))))))))
+      (is (= "insufficient_scope" (:error (json/read-json (:body r))))))))
 
 (deftest access
   (let [clock  (atom noon)

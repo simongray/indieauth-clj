@@ -1,9 +1,9 @@
 (ns ^:no-doc dk.simongray.indieauth.ring
   "The Ring requests that the endpoints take, and the answers they give."
   (:require [clojure.string :as str]
-            [dk.simongray.indieauth.json :as json]
             #?(:clj [dk.simongray.wary-fetch.async :as async])
             [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.wary-fetch.json :as json]
             [dk.simongray.wary-fetch.url :as url])
   #?(:clj (:import [java.io InputStream])))
 

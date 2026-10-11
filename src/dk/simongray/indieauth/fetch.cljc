@@ -8,6 +8,7 @@
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
+            [dk.simongray.wary-fetch.json :as json]
             [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]))
 
@@ -69,6 +70,15 @@
    :headers {"Content-Type" "application/x-www-form-urlencoded"
              "Accept"       "application/json"}
    :body    (secret/hide (url/query-string fields))})
+
+(defn json-object
+  "The map of the JSON object in the text `s`, with keyword keys in the
+  names that the spec gives them, or nil when `s` holds another value or
+  isn't JSON."
+  [s]
+  (let [x (json/read-json s)]
+    (when (map? x)
+      x)))
 
 (defn page-nodes
   "The Hiccup of the HTML page in the `response`, or nil when it holds

@@ -8,8 +8,8 @@
   (:require [clojure.string :as str]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.digest :as digest]
+            [dk.simongray.indieauth.fetch :as fetch]
             [dk.simongray.indieauth.instant :as instant]
-            [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
@@ -104,7 +104,7 @@
                                                     :max-bytes max-json-bytes
                                                     :max-redirects 0))
                 (fn [{{:keys [status body]} :value error :error}]
-                  (let [m (json/read-object body)]
+                  (let [m (fetch/json-object body)]
                     (cond
                       error
                       {:error (http/failure error)}

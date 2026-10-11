@@ -6,10 +6,10 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
-            [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.state :as state]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.json :as json]
             [dk.simongray.wary-fetch.secret :as secret]))
 
 (deftest profile-urls
@@ -509,7 +509,7 @@
         r       (handler {:request-method :get :uri "/"})]
     (is (= 200 (:status r)))
     (is (= "application/json" (get-in r [:headers "Content-Type"])))
-    (is (= {:client_id "https://app.example/" :client_uri "https://app.example/"} (json/read-object (:body r))))
+    (is (= {:client_id "https://app.example/" :client_uri "https://app.example/"} (json/read-json (:body r))))
     (is (= 405 (:status (handler {:request-method :post :uri "/"}))))))
 
 ;; phase 2: refresh, revocation and userinfo

@@ -16,13 +16,13 @@
             [dk.simongray.indieauth.fetch :as fetch]
             [dk.simongray.indieauth.identifier :as identifier]
             [dk.simongray.indieauth.instant :as instant]
-            [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.links :as links]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.indieauth.state :as state]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.wary-fetch.json :as json]
             [dk.simongray.wary-fetch.url :as url]))
 
 ;;; identifiers
@@ -280,7 +280,7 @@
                 (fn [{:keys [error body] :as response}]
                   (if error
                     response
-                    (let [metadata (json/read-object body)]
+                    (let [metadata (fetch/json-object body)]
                       (if-let [problem (metadata-problem metadata metadata-url)]
                         (fetch/failure ::invalid-metadata problem {:url metadata-url})
                         (metadata-server discovery metadata metadata-url))))))
@@ -459,7 +459,7 @@
    (redemption response {}))
   ([{:keys [status body] :as response} opts]
    (let [{:keys [profile-url-pred]} (merge default-options opts)
-         m                          (json/read-object body)
+         m                          (fetch/json-object body)
          me                         (when (string? (:me m))
                                       (canonical-url (:me m)))]
      (cond
@@ -624,7 +624,7 @@
                                   "Authorization" (http/authorization {:token access-token})}}
                        (merge default-options opts))
       (fn [{:keys [error status body] :as response}]
-        (let [m (json/read-object body)]
+        (let [m (fetch/json-object body)]
           (cond
             error                        response
             (not (ring/success? status)) (fetch/server-error ::userinfo-error status m)

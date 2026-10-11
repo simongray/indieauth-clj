@@ -10,12 +10,12 @@
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.digest :as digest]
-            [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.server :as server]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.bytes :as bytes]
+            [dk.simongray.wary-fetch.json :as json]
             [dk.simongray.wary-fetch.url :as url]))
 
 (def verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
@@ -132,7 +132,7 @@
         (is (= 200 (:status r)))
         (is (= "application/json" (get-in r [:headers "Content-Type"])))
         (is (= "*" (get-in r [:headers "Access-Control-Allow-Origin"])))
-        (is (= m (json/read-object (:body r))))))
+        (is (= m (json/read-json (:body r))))))
     (testing "S117: at the well-known URL by default"
       (is (= "https://auth.example/.well-known/oauth-authorization-server" (:href (first (server/links opts))))))
     (testing "S115: the older links name the same endpoints"
@@ -393,7 +393,7 @@
 (defn- answer
   "The JSON of the body of the `response`."
   [response]
-  (json/read-object (:body response)))
+  (json/read-json (:body response)))
 
 (deftest token-endpoint
   (let [clock (atom noon)
