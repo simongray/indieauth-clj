@@ -194,6 +194,8 @@
   - :body-links?, false: only the head of a page names its server, since
     anyone who writes in its body could name another
   - :session-seconds, how long a user has to sign in at the server
+  - :max-cookie-bytes, state/max-cookie-bytes: the largest cookie of a
+    signed session, past which authorization-request throws
   - :max-redirects, how many redirects discovery follows
   - :timeout-seconds, :max-page-bytes and :max-json-bytes, the limits of
     each request
@@ -202,6 +204,7 @@
   {:profile-url-pred profile-url?
    :body-links?      false
    :session-seconds  600
+   :max-cookie-bytes state/max-cookie-bytes
    :timeout-seconds  10
    :max-redirects    5
    :max-page-bytes   (* 2 1024 1024)
@@ -347,18 +350,18 @@
   - :scope, the scopes to ask for, as a text or a collection. Without one,
     the answer has the user's profile URL alone.
   - :secret, a text of 32 bytes or more, e.g. a token, that signs the
-    session into the state for state-session
+    session into a cookie for state-session
   - :data, any EDN that the session carries for you
-  - :now-fn, as default-options has it
+  - :now-fn and :max-cookie-bytes, as default-options has them
 
   Keep the session for the browser's return, e.g. in a session store, or
-  with a :secret, only its :nonce in a cookie. A scope that asks for an
-  access token needs a token endpoint, and a server without one gives a
-  map of the :error."
+  with a :secret, only its :cookie, in an HttpOnly cookie. A scope that
+  asks for an access token needs a token endpoint, and a server without
+  one gives a map of the :error."
   [{:keys [me authorization-endpoint token-endpoint] :as discovery}
    {:keys [client-id redirect-uri scope secret data] :as opts}]
-  (let [{:keys [now-fn]} (merge default-options opts)
-        asked            (scopes scope)]
+  (let [{:keys [now-fn max-cookie-bytes]} (merge default-options opts)
+        asked                             (scopes scope)]
     (when-let [problem (request-problem client-id redirect-uri asked)]
       (throw (ex-info problem {:client-id    client-id
                                :redirect-uri redirect-uri
@@ -376,7 +379,8 @@
                                     :redirect-uri redirect-uri
                                     :scope        (scope-text asked)})
                       (some? data) (assoc :data data))
-            {:keys [state code-verifier] :as fresh} (state/fresh secret ::session session (now-fn))]
+            {:keys [state code-verifier] :as fresh} (state/fresh secret ::session session (now-fn)
+                                                                 max-cookie-bytes)]
         {:url     (url/with-query authorization-endpoint
                     [["response_type" "code"]
                      ["client_id" client-id]
@@ -388,20 +392,20 @@
                      ["me" me]])
          :session (merge session fresh)}))))
 
-;; IndieAuth 5.2.1: the state can hold the session; RFC 9700, section
-;; 4.7.1: a state that is bound to the browser
+;; RFC 9700, section 4.7.1: a state that is bound to the browser
 (defn state-session
-  "The session that the signed `state` carries, which authorization-request
-  gave with the `secret`, if the `nonce` is the session's, or nil. It's nil
-  too when the state is older than the :session-seconds of `opts`.
+  "The session that the signed `cookie` carries, which authorization-request
+  gave with the `secret`, if its state is the `state` that came back, or
+  nil. It's nil too when the cookie is older than the :session-seconds of
+  `opts`.
 
-  The nonce comes from the browser that came back, e.g. from a cookie,
-  so that only the browser that started the sign-in can finish it."
-  ([secret state nonce]
-   (state-session secret state nonce {}))
-  ([secret state nonce opts]
+  The cookie comes from the browser that came back, so that only the
+  browser that started the sign-in can finish it."
+  ([secret state cookie]
+   (state-session secret state cookie {}))
+  ([secret state cookie opts]
    (let [{:keys [session-seconds now-fn]} (merge default-options opts)]
-     (state/session secret ::session state nonce (now-fn) session-seconds))))
+     (state/session secret ::session state cookie (now-fn) session-seconds))))
 
 ;; IndieAuth 5.2.1; RFC 9207, section 2.4; RFC 6749, section 4.1.2.1
 (defn callback-problem

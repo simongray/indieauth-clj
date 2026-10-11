@@ -326,35 +326,43 @@
                                                                                 :secret secret-text
                                                                                 :now-fn (constantly noon)))
         state                 (get (t/query url) "state")
-        nonce                 (:nonce session)
+        cookie                (:cookie session)
         later                 {:now-fn (constantly #inst "2026-10-11T12:09:00Z")}]
-    (testing "the state carries the session, and the verifier comes from the state"
-      (is (= session (indieauth/state-session secret-text state nonce later)))
+    (testing "the cookie carries the session, and the verifier comes from the state"
+      (is (= session (indieauth/state-session secret-text state cookie later)))
       (is (= (indieauth/code-challenge (:code-verifier session)) (get (t/query url) "code_challenge")))
       (is (not (str/includes? url (:code-verifier session))) "the verifier isn't in the URL"))
-    (testing "RFC 9700, section 4.7.1: only for the browser with the nonce"
-      (is (string? nonce))
-      (is (not (str/includes? url nonce)) "the nonce isn't in the URL")
+    (testing "the state is short and random, so a provider's limit on URLs never meets it"
+      (is (= 43 (count state)))
+      (is (not (str/includes? url cookie)) "the session isn't in the URL"))
+    (testing "RFC 9700, section 4.7.1: only for the browser with the cookie"
+      (is (string? cookie))
       (is (nil? (indieauth/state-session secret-text state nil later)))
-      (is (nil? (indieauth/state-session secret-text state (indieauth/token) later))))
+      (is (nil? (indieauth/state-session secret-text (indieauth/token) cookie later)) "the state of another sign-in"))
     (testing "but not after :session-seconds, nor with another secret"
-      (is (nil? (indieauth/state-session secret-text state nonce {:now-fn (constantly #inst "2026-10-11T12:11:00Z")})))
-      (is (nil? (indieauth/state-session (str secret-text "!") state nonce {:now-fn (constantly noon)}))))
-    (testing "the state of another protocol under the same secret, e.g. RelMeAuth's"
+      (is (nil? (indieauth/state-session secret-text state cookie {:now-fn (constantly #inst "2026-10-11T12:11:00Z")})))
+      (is (nil? (indieauth/state-session (str secret-text "!") state cookie {:now-fn (constantly noon)}))))
+    (testing "the cookie of another protocol under the same secret, e.g. RelMeAuth's"
       (let [other (state/fresh secret-text :example/relmeauth {:me "https://user.example/"} noon)]
-        (is (= "https://user.example/" (:me (state/session secret-text :example/relmeauth (:state other) (:nonce other) noon 600))))
-        (is (nil? (indieauth/state-session secret-text (:state other) (:nonce other) later)))
-        (is (nil? (state/session secret-text :example/relmeauth state nonce noon 600)))))
-    (testing "a session without a secret has no nonce"
-      (is (nil? (:nonce (:session (indieauth/authorization-request discovery client))))))
-    (testing ":data, which the session carries, also in a signed state"
+        (is (= "https://user.example/" (:me (state/session secret-text :example/relmeauth (:state other) (:cookie other) noon 600))))
+        (is (nil? (indieauth/state-session secret-text (:state other) (:cookie other) later)))
+        (is (nil? (state/session secret-text :example/relmeauth state cookie noon 600)))))
+    (testing "a session without a secret has no cookie"
+      (is (nil? (:cookie (:session (indieauth/authorization-request discovery client))))))
+    (testing "a cookie larger than a browser keeps throws"
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (indieauth/authorization-request discovery (assoc client :secret secret-text
+                                                                     :data (apply str (repeat 4000 "x"))))))
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (indieauth/authorization-request discovery (assoc client :secret secret-text :max-cookie-bytes 100)))))
+    (testing ":data, which the session carries, also in a signed cookie"
       (let [data                  {:request "a request of the app's own server"}
             {:keys [url session]} (indieauth/authorization-request discovery (assoc client
                                                                                     :data data
                                                                                     :secret secret-text
                                                                                     :now-fn (constantly noon)))]
         (is (= data (:data session)))
-        (is (= data (:data (indieauth/state-session secret-text (get (t/query url) "state") (:nonce session) later)))))
+        (is (= data (:data (indieauth/state-session secret-text (get (t/query url) "state") (:cookie session) later)))))
       (is (not (contains? (:session (indieauth/authorization-request discovery (assoc client :data nil))) :data))
           "and nil is left out"))))
 

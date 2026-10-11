@@ -39,7 +39,7 @@ from [Clojars](https://clojars.org/dk.simongray/indieauth-clj) to the
 `:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/indieauth-clj {:mvn/version "0.1.0"}
+dk.simongray/indieauth-clj {:mvn/version "0.2.0"}
 ```
 
 For changes that aren't released yet, use the SHA of the latest commit on
@@ -123,11 +123,14 @@ logo. List there too any redirect URL that isn't on the client
 identifier's host.
 
 If you'd rather not keep sessions in your app, give
-`authorization-request` a `:secret`. The state then carries the session,
-signed, and the session's `:nonce` goes in a cookie, e.g. one with
+`authorization-request` a `:secret`. The session's `:cookie` then
+carries the session, signed, so put it in a cookie, e.g. one with
 `HttpOnly` and `SameSite=Lax`. At the redirect URL, `state-session` gets
-the session back from the state and the cookie's nonce, so that only the
-browser that started a sign-in can finish it.
+the session back from that cookie and the state, so that only the browser
+that started a sign-in can finish it. The state itself stays short, since
+providers limit and log URLs. A session too large for a cookie, e.g.
+because of a large `:data`, throws rather than being dropped by the
+browser.
 
 ### Run a server
 

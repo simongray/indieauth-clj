@@ -115,7 +115,7 @@
                            (swap! sessions assoc (:state session) session))
                          {:status  302
                           :headers (cond-> {"Location" url}
-                                     secret (assoc "Set-Cookie" (str "nonce=" (:nonce session)
+                                     secret (assoc "Set-Cookie" (str "signin=" (:cookie session)
                                                                      "; Path=/callback; HttpOnly; Secure; SameSite=Lax")))
                           :body    ""})))))
 
@@ -123,9 +123,9 @@
      (fn [{:keys [query-string headers]}]
        (let [params  (url/query-params query-string)
              state   (get params "state")
-             nonce   (second (re-find #"(?:^|;\s*)nonce=([^;]*)" (str (get headers "cookie"))))
+             cookie  (second (re-find #"(?:^|;\s*)signin=([^;]*)" (str (get headers "cookie"))))
              session (if secret
-                       (indieauth/state-session secret state nonce)
+                       (indieauth/state-session secret state cookie)
                        (get @sessions state))]
          (swap! sessions dissoc state)
          (async/then (indieauth/redeem! session params opts)
