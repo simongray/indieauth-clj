@@ -130,9 +130,9 @@
     step, so that two calls never both get it
   - :delete!, a function of a key that removes its value
 
-  The store of codes needs :put! and :take!, and the store of tokens
-  :put!, :get and :delete!. A value is a map that can have :expires, an
-  instant after which it's of no use, which a store can drop."
+  The store of codes needs :put! and :take!, and the store of tokens all
+  four. A value is a map that can have :expires, an instant after which
+  it's of no use, which a store can drop."
   ([]
    (memory-store (atom {})))
   ([a]

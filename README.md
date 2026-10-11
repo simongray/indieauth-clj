@@ -19,8 +19,9 @@ tokens.
 - **Nothing in the background.** Signing the user in at the server,
   the consent page and the storage of codes and tokens are yours.
 - **Safe by default.** PKCE with S256 is required, a code works once and
-  for a minute, tokens are kept as hashes, secrets are compared in
-  constant time, and only the public internet is fetched.
+  for a minute, tokens expire and are kept as hashes, a code or a refresh
+  token used twice revokes its tokens, secrets are compared in constant
+  time, and only the public internet is fetched.
 
 The same code runs on the JVM, in Node and in the browser.
 
@@ -93,17 +94,26 @@ along with the session:
 
 ```clojure
 (indieauth/redeem! (:session request) query-params)
-;; => {:me           "https://simon.grays.blog/"
-;;     :access_token "…"
-;;     :token_type   "Bearer"
-;;     :scope        "profile create"
-;;     :profile      {:name "Simon Gray" :url "https://simon.grays.blog/"}}
+;; => {:me            "https://simon.grays.blog/"
+;;     :access_token  "…"
+;;     :token_type    "Bearer"
+;;     :scope         "profile create"
+;;     :expires_in    86400
+;;     :refresh_token "…"
+;;     :profile       {:name "Simon Gray" :url "https://simon.grays.blog/"}}
 ```
 
 It checks the state and the issuer, redeems the code, and confirms that
 the page of the `:me` names the same server, as section 5.4 asks. A
 failure at any step gives a map of the `:error`, with its `:type` and
-`:reason`. Use the session once, and drop it.
+`:reason`. Use the session once for this, and keep it with the answer
+if you'll use the token.
+
+When the access token expires, after its `:expires_in` seconds,
+`refresh!` exchanges the `:refresh_token` for a new one, and the new
+answer's refresh token replaces the old. With the session and a token,
+`userinfo!` reads the user's profile information again, and `revoke!`
+revokes the token when the user signs out.
 
 Serve your client metadata at the client identifier with
 `client-metadata-handler`, so that servers can show your app's name and
@@ -140,6 +150,8 @@ the consent page:
    :metadata-url           "https://simon.grays.blog/auth/metadata"
    :authorization-endpoint "https://simon.grays.blog/auth"
    :token-endpoint         "https://simon.grays.blog/auth/token"
+   :revocation-endpoint    "https://simon.grays.blog/auth/revoke"
+   :userinfo-endpoint      "https://simon.grays.blog/auth/userinfo"
    :scopes-supported       ["profile" "email" "create" "update" "delete"]
    :secret                 (indieauth/token)
    :codes                  (server/memory-store)
@@ -147,10 +159,10 @@ the consent page:
    :authorize              authorize})
 ```
 
-Serve `(server/handler opts)` at the authorization endpoint,
-`(server/token-handler opts)` at the token endpoint and
-`(server/metadata-handler opts)` at the metadata URL, and name them on
-the user's pages with the links of `server/links` or
+Serve each endpoint with its handler: `server/handler` for the
+authorization endpoint, and `token-handler`, `revocation-handler`,
+`userinfo-handler` and `metadata-handler` for the others, each of `opts`.
+Name them on the user's pages with the links of `server/links` or
 `server/link-header`. Keep the `:secret`, a text of 32 bytes or more, so
 that a restart doesn't void the sign-ins under way.
 
@@ -166,11 +178,12 @@ user says yes, send the browser on to the redirect of `approve!`:
 ```
 
 The client's code works once, for a minute, and the token handler gives
-it an access token. When the user says no, send the browser to the URL
-of `server/denial`. A store is a map of a few functions, so one for a
+it an access token, which lasts a day, and a refresh token, which lasts
+30 days unused. When the user says no, send the browser to the URL of
+`server/denial`. A store is a map of a few functions, so one for a
 database takes a few lines, and `server/memory-store` describes them.
-The options that have defaults, e.g. the lifetimes of codes and tokens,
-are in `server/default-options`.
+The options that have defaults, e.g. those lifetimes, are in
+`server/default-options`.
 
 ### Check a token
 
@@ -182,11 +195,19 @@ the token of a request with `access!`:
 ;; => {:me        "https://simon.grays.blog/"
 ;;     :client-id "https://app.example.net/"
 ;;     :scope     "create"
-;;     :issued-at #inst "2026-10-11T12:00:00Z"}
+;;     :issued-at #inst "2026-10-11T12:00:00Z"
+;;     :expires   #inst "2026-10-12T12:00:00Z"
+;;     :grant     "…"}
 ```
 
 When the token is missing, unknown or lacks the scope, it gives the
 `:error` and the Ring `:response` to answer with.
+
+A resource server in another process asks the server's introspection
+endpoint instead. Serve `introspection-handler` with the
+`:resource-tokens` that resource servers may ask with, and give
+`access!` the `:introspection-endpoint` and one `:resource-token` in place
+of the `:tokens`.
 
 Principles
 ----------
