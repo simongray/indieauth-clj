@@ -11,24 +11,25 @@ in, and the server, which authenticates the user and issues access
 tokens.
 
 - **The spec.** The code follows the Living Standard of 11 July 2024 and
-  cites the section of each rule it implements. Its tests include the
-  scenarios of the [indieauth.rocks](https://indieauth.rocks) test suite,
-  run locally.
-- **Plain data.** Requests, sessions and the data of a consent page are
-  maps, and the endpoints are Ring handlers.
-- **Nothing in the background.** Signing the user in at the server,
-  the consent page and the storage of codes and tokens are yours.
+  cites the section of each rule it implements. Its tests reproduce most
+  scenarios of the [indieauth.rocks](https://indieauth.rocks) test suite
+  locally.
+- **Plain data.** Requests, sessions and a consent page's data are maps,
+  and the endpoints are Ring handlers.
+- **Nothing in the background.** No timer runs: an expired code or token
+  is refused when it's used. Signing the user in, the consent page and
+  the storage of codes and tokens are yours.
 - **Safe by default.** PKCE with S256 is required, and a code works once
   and for a minute. Tokens expire and are kept as hashes, and a code or a
   refresh token used twice revokes its tokens. Secrets are compared in
-  constant time, and only the public internet is fetched.
+  constant time, and requests go to the public internet alone.
 
 The same code runs on the JVM, in Node and in the browser.
 
 > This library was spun out of [indieblog](https://github.com/simongray/indieblog),
-> the software of [simon.grays.blog](https://simon.grays.blog), which is its
-> own IndieAuth server and signs its commenters in with theirs. Like
-> indieblog, it was developed with assistance from frontier LLMs.
+> the software of [simon.grays.blog](https://simon.grays.blog), which makes the
+> blog its own IndieAuth server and signs its commenters in with their own.
+> Like indieblog, it was developed with assistance from frontier LLMs.
 
 Getting started
 ---------------
@@ -52,13 +53,13 @@ dk.simongray/indieauth-clj
 
 For ClojureScript, shadow-cljs only reads Git dependencies from
 `deps.edn`, so also set `:deps true` in your `shadow-cljs.edn`. A function
-that fetches gives a promise there. In a browser, a page that doesn't
-allow other origins with CORS can't be read, so a client usually runs on
-a server.
+that fetches gives a promise there. In a browser, a page can only be read
+when its server allows other origins with CORS, which most profile pages
+don't, so a client usually runs on a server.
 
 ### Sign a user in
 
-Find the server of the URL that the user typed with `discover!`:
+With `discover!`, find the server of the URL that the user typed:
 
 ```clojure
 (require '[dk.simongray.indieauth :as indieauth])
@@ -74,9 +75,9 @@ Find the server of the URL that the user typed with `discover!`:
 ;;     :token-endpoint         "https://simon.grays.blog/auth/token"}
 ```
 
-Then send the user's browser to the server with the URL of
-`authorization-request`, and keep the session it gives you where the
-browser's next request finds it, e.g. in your session store:
+Then send the user's browser to the `:url` that `authorization-request`
+gives, and keep its `:session` where the browser's next request finds
+it, e.g. in your session store:
 
 ```clojure
 (def request
@@ -89,8 +90,8 @@ browser's next request finds it, e.g. in your session store:
 ```
 
 Without a scope, you get the user's profile URL alone. The browser comes
-back to the redirect URL with the query parameters that `redeem!` takes,
-along with the session:
+back to the redirect URL with query parameters, which `redeem!` takes
+with the session:
 
 ```clojure
 (indieauth/redeem! (:session request) query-params)
@@ -106,31 +107,32 @@ along with the session:
 It checks the state and the issuer, redeems the code, and confirms that
 the page of the `:me` names the same server, as section 5.4 asks. A
 failure at any step gives a map of the `:error`, with its `:type` and
-`:reason`. A session redeems one code, so keep it with the answer only
-if you'll use the token later.
+`:reason`. A session redeems one code. Keep it with the answer if you'll
+use the token later, since `refresh!`, `userinfo!` and `revoke!` take it
+too.
 
 When the access token expires, after its `:expires_in` seconds,
-`refresh!` exchanges the `:refresh_token` for a new one, and the new
-answer's refresh token replaces the old. With the session and a token,
-`userinfo!` reads the user's profile information again, and `revoke!`
-revokes the token when the user signs out.
+`refresh!` exchanges the `:refresh_token` for a new access token. Its
+answer has a new refresh token too, which replaces the old one. With the
+session and a token, `userinfo!` reads the user's profile information
+again, and `revoke!` revokes the token when the user signs out.
 
 Serve your client metadata at the client identifier with
 `client-metadata-handler`, so that servers can show your app's name and
-logo. A redirect URL on another host than the client identifier's must
-be listed there too.
+logo. List there too any redirect URL that isn't on the client
+identifier's host.
 
-If you'd rather keep nothing on the server, give `authorization-request`
-a `:secret`. The state then carries the session, signed, and the
-session's `:nonce` goes in a cookie, e.g. `HttpOnly` and `SameSite=Lax`.
-At the redirect URL, `state-session` gets the session back from the state
-and the cookie's nonce, so that only the browser that started a sign-in
-can finish it.
+If you'd rather not keep sessions in your app, give
+`authorization-request` a `:secret`. The state then carries the session,
+signed, and the session's `:nonce` goes in a cookie, e.g. one with
+`HttpOnly` and `SameSite=Lax`. At the redirect URL, `state-session` gets
+the session back from the state and the cookie's nonce, so that only the
+browser that started a sign-in can finish it.
 
 ### Run a server
 
 A server consists of its Ring handlers, two stores and a function of
-yours, `:authorize`, which signs the user in by any means and shows them
+yours, `:authorize`, which signs the user in as you like and shows them
 the consent page:
 
 ```clojure
@@ -160,30 +162,33 @@ the consent page:
    :authorize              authorize})
 ```
 
-Serve each endpoint with its handler: `server/handler` for the
-authorization endpoint, and `token-handler`, `revocation-handler`,
-`userinfo-handler` and `metadata-handler` for the others, each of `opts`.
-Name them on the user's pages with the links of `server/links` or
-`server/link-header`. Keep the `:secret`, a text of 32 bytes or more, so
-that a restart doesn't void the sign-ins under way.
+Serve each endpoint with its handler, each made from `opts`:
+`server/handler` for the authorization endpoint, and `token-handler`,
+`revocation-handler`, `userinfo-handler` and `metadata-handler` for the
+others. Name them on the user's pages with the links of `server/links`
+or `server/link-header`. The `:secret` is a text of 32 bytes or more.
+Make it once, e.g. with `indieauth/token`, and keep it in your
+configuration, since a new one at each start voids the sign-ins under
+way.
 
 The handler checks the client's request before `authorize` gets it, and
 `request-token` carries it through your sign-in pages. The consent page
 names the client and lists the scopes that `consent` gives, and its form
 posts back the `:token`, which is signed for that user alone. When the
-user says yes, send the browser on to the redirect of `approve!`:
+user says yes, send the browser on to the `:redirect` that `approve!`
+gives:
 
 ```clojure
 (server/approve! token {:me "https://simon.grays.blog/" :scopes ["create"]} opts)
 ;; => {:redirect "https://app.example.net/callback?code=…&state=…&iss=…"}
 ```
 
-The client's code works once, for a minute, and the token handler gives
-it an access token, which lasts a day, and a refresh token, which lasts
-30 days unused. When the user says no, send the browser to the URL of
-`server/denial`. A store is a map of a few functions, so one for a
-database takes a few lines, and `server/memory-store` describes them.
-The options that have defaults, e.g. those lifetimes, are in
+The code works once and for a minute, and the token handler exchanges
+it for an access token, which lasts a day, and a refresh token, which
+lasts 30 days unused. When the user says no, send the browser to the URL
+of `server/denial`. A store is a map of a few functions, so one for a
+database takes a few lines, and the docstring of `server/memory-store`
+lists them. The options that have defaults, e.g. those lifetimes, are in
 `server/default-options`.
 
 ### Check a token
@@ -207,21 +212,22 @@ When the token is missing, unknown or lacks the scope, it gives the
 `:error` and the Ring `:response` to answer with.
 
 A resource server in another process asks the server's introspection
-endpoint instead. Serve `server/introspection-handler` with the
-`:resource-tokens` that resource servers may ask with, and give
-`access!` the `:introspection-endpoint` and one `:resource-token` in place
-of the `:tokens`.
+endpoint instead. Add the `:resource-tokens` that resource servers may
+ask with to the server's `opts`, and serve
+`server/introspection-handler`. Then give `access!` the
+`:introspection-endpoint` and one of those tokens as its
+`:resource-token`, in place of the `:tokens`.
 
 Principles
 ----------
 
 - **Standards first.** The code follows the Living Standard and cites
-  its sections, and a comment marks each choice of its own. Most rules
+  its sections, and a comment marks each choice of its own. Some rules
   are options too, and `indieauth/default-options` and
   `server/default-options` list their defaults, which follow the spec.
-- **Plain data.** Sessions, requests and grants are maps, documents of
-  the spec keep the names of their JSON, and every function that sends
-  takes a `:send` of your own.
+- **Plain data.** Sessions, requests and grants are maps, and the spec's
+  JSON documents keep its names, e.g. `:access_token`. Every function
+  that sends takes a `:send` of your own.
 - **One codebase.** The library is written in `.cljc` and depends on
   [wary-fetch](https://github.com/simongray/wary-fetch) for requests,
   [html-pieces](https://github.com/simongray/html-pieces) for pages and
