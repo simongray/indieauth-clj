@@ -31,7 +31,7 @@
 (defn- redirect-uri-problem
   "What's wrong with `s` as a redirect URL, or nil."
   [s]
-  (let [{:keys [scheme fragment]} (identifier/url-parts s)]
+  (let [{:keys [scheme fragment]} (url/parts s)]
     (cond
       (nil? scheme)                             "redirect_uri isn't an absolute URL"
       (some? fragment)                          "redirect_uri has a fragment"

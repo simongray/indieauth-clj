@@ -10,7 +10,6 @@
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.wary-fetch.json :as json]
-            [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]))
 
 (defn failure
@@ -61,16 +60,13 @@
               (fn [{:keys [value error]}]
                 (or value {:error (http/failure error)}))))
 
+;; IndieAuth 5.3.1
 (defn form-request
   "The request map that posts the form of `fields`, pairs of a name and a
-  value, to `url` for a JSON answer. The body is a hidden text of
-  wary-fetch, since it holds a code or a token."
+  value, to `url` for a JSON answer, with a hidden body, since it holds a
+  code or a token."
   [url fields]
-  {:method  :post
-   :url     url
-   :headers {"Content-Type" "application/x-www-form-urlencoded"
-             "Accept"       "application/json"}
-   :body    (secret/hide (url/query-string fields))})
+  (http/form-request url fields {:headers {"Accept" "application/json"}}))
 
 (defn json-object
   "The map of the JSON object in the text `s`, with keyword keys in the

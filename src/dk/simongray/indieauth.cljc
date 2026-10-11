@@ -56,7 +56,7 @@
   "Whether `s` is a valid issuer identifier of a server: an https URL with
   a host, and without a query or a fragment."
   [s]
-  (let [{:keys [scheme host query fragment]} (identifier/url-parts s)]
+  (let [{:keys [scheme host query fragment]} (url/parts s)]
     (boolean (and (string? s)
                   (= "https" scheme)
                   (seq host)
@@ -72,7 +72,7 @@
       (well-known-url \"https://example.com/indieauth/\")
       ;; => \"https://example.com/.well-known/oauth-authorization-server/indieauth\""
   [issuer]
-  (let [{:keys [scheme authority path]} (identifier/url-parts issuer)]
+  (let [{:keys [scheme authority path]} (url/parts issuer)]
     (str scheme "://" authority "/.well-known/oauth-authorization-server"
          (str/replace path #"/$" ""))))
 
@@ -105,7 +105,7 @@
       (canonical-url \"Example.com\") ;; => \"https://example.com/\""
   [s]
   (let [{:keys [scheme userinfo host port path query fragment]}
-        (identifier/url-parts (identifier/with-scheme (str/trim (str s))))]
+        (url/parts (identifier/with-scheme (str/trim (str s))))]
     (when (and (#{"http" "https"} scheme) (seq host))
       (str scheme "://"
            (some-> userinfo (str "@"))

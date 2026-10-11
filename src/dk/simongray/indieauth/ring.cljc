@@ -28,17 +28,6 @@
     (when (and b (<= (bytes/length b) max-bytes))
       b)))
 
-;; URL Standard, section 5.1
-(defn fields
-  "The fields of the form or query `s` in application/x-www-form-urlencoded,
-  as pairs of a name and a value."
-  [s]
-  (let [decode #(url/percent-decode (str/replace % "+" " "))]
-    (for [part  (str/split (str s) #"&")
-          :when (seq part)
-          :let  [[k v] (str/split part #"=" 2)]]
-      [(decode k) (decode (or v ""))])))
-
 (defn param-fields
   "The fields of the Ring `params` map, whose keys are texts or keywords
   and whose values are texts or vectors of them, as pairs of a name and a
@@ -53,7 +42,7 @@
   value, from its :query-string or else its :query-params."
   [{:keys [query-string query-params] :as request}]
   (if query-string
-    (fields query-string)
+    (url/query-pairs query-string)
     (param-fields query-params)))
 
 (defn form-fields
@@ -63,7 +52,7 @@
   [{:keys [form-params body] :as request} max-bytes]
   (if (seq form-params)
     (param-fields form-params)
-    (some-> (body-bytes body max-bytes) bytes/decode fields)))
+    (some-> (body-bytes body max-bytes) bytes/decode url/query-pairs)))
 
 (defn param
   "The value of the parameter `k`, a text, in `params`, a map whose keys

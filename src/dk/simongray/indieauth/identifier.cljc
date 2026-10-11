@@ -1,29 +1,8 @@
 (ns ^:no-doc dk.simongray.indieauth.identifier
-  "The parts of a URL as RFC 3986 reads them, and the rules that the
-  identifiers of IndieAuth are made of: those of users, clients and
-  servers, which dk.simongray.indieauth checks."
+  "The rules that the identifiers of IndieAuth are made of: those of
+  users, clients and servers, which dk.simongray.indieauth checks."
   (:require [clojure.string :as str]
             [dk.simongray.wary-fetch.url :as url]))
-
-;; RFC 3986, appendix B
-(defn url-parts
-  "The parts of the URL `s` as a map of :scheme, :authority, :userinfo,
-  :host, :port, :path, :query and :fragment, each nil when the URL has
-  none, or nil when `s` has no scheme. The scheme is in lower case."
-  [s]
-  (when-let [[_ scheme authority path query fragment]
-             (re-matches #"(?s)([a-zA-Z][a-zA-Z0-9+.\-]*):(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?"
-                         (str s))]
-    (let [[_ userinfo host port] (some->> authority
-                                          (re-matches #"(?s)(?:(.*)@)?(\[[^\]]*\]|[^:]*)(?::(.*))?"))]
-      {:scheme    (str/lower-case scheme)
-       :authority authority
-       :userinfo  userinfo
-       :host      host
-       :port      port
-       :path      path
-       :query     query
-       :fragment  fragment})))
 
 (def unsafe-characters
   "The characters that a URL of IndieAuth never has as they are: spaces,
@@ -72,13 +51,13 @@
 
 ;; IndieAuth 3.2 and 3.3, with an empty path as /, as section 3.4 has it
 (defn parts
-  "The parts of `s` as url-parts gives them, if it passes the rules that
+  "The parts of `s` as url/parts gives them, if it passes the rules that
   profile URLs and client identifiers share: an http or https URL with a
   host, and without a fragment, a user name, a password, a . or ..
   segment in its path, or a character of unsafe-characters. Else nil."
   [s]
   (when (and (string? s) (not (re-find unsafe-characters s)))
-    (let [{:keys [scheme userinfo host path fragment] :as parts} (url-parts s)]
+    (let [{:keys [scheme userinfo host path fragment] :as parts} (url/parts s)]
       (when (and (#{"http" "https"} scheme)
                  (seq host)
                  (nil? userinfo)
@@ -91,6 +70,6 @@
   "Whether the URL `s` names a loopback host: 127.0.0.1, [::1] or
   localhost."
   [s]
-  (let [host (:host (url-parts s))]
+  (let [host (:host (url/parts s))]
     (boolean (or (contains? loopback-hosts host)
                  (re-find #"(?i)(^|\.)localhost\.?$" (str host))))))
