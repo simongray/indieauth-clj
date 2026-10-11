@@ -18,10 +18,10 @@ tokens.
   maps, and the endpoints are Ring handlers.
 - **Nothing in the background.** Signing the user in at the server,
   the consent page and the storage of codes and tokens are yours.
-- **Safe by default.** PKCE with S256 is required, a code works once and
-  for a minute, tokens expire and are kept as hashes, a code or a refresh
-  token used twice revokes its tokens, secrets are compared in constant
-  time, and only the public internet is fetched.
+- **Safe by default.** PKCE with S256 is required, and a code works once
+  and for a minute. Tokens expire and are kept as hashes, and a code or a
+  refresh token used twice revokes its tokens. Secrets are compared in
+  constant time, and only the public internet is fetched.
 
 The same code runs on the JVM, in Node and in the browser.
 
@@ -106,8 +106,8 @@ along with the session:
 It checks the state and the issuer, redeems the code, and confirms that
 the page of the `:me` names the same server, as section 5.4 asks. A
 failure at any step gives a map of the `:error`, with its `:type` and
-`:reason`. Use the session once for this, and keep it with the answer
-if you'll use the token.
+`:reason`. A session redeems one code, so keep it with the answer only
+if you'll use the token later.
 
 When the access token expires, after its `:expires_in` seconds,
 `refresh!` exchanges the `:refresh_token` for a new one, and the new
@@ -117,7 +117,8 @@ revokes the token when the user signs out.
 
 Serve your client metadata at the client identifier with
 `client-metadata-handler`, so that servers can show your app's name and
-logo, and list the redirect URLs on other hosts there.
+logo. A redirect URL on another host than the client identifier's must
+be listed there too.
 
 If you'd rather keep nothing on the server, give `authorization-request`
 a `:secret`. The state then carries the session, signed, and the
@@ -188,10 +189,12 @@ The options that have defaults, e.g. those lifetimes, are in
 ### Check a token
 
 A resource server in the same process, e.g. a Micropub endpoint, checks
-the token of a request with `access!`:
+the token of a request with `access!` and the server's `opts`:
 
 ```clojure
-(server/access! ring-request ["create"] opts)
+(require '[dk.simongray.indieauth.resource :as resource])
+
+(resource/access! ring-request ["create"] opts)
 ;; => {:me        "https://simon.grays.blog/"
 ;;     :client-id "https://app.example.net/"
 ;;     :scope     "create"
@@ -204,7 +207,7 @@ When the token is missing, unknown or lacks the scope, it gives the
 `:error` and the Ring `:response` to answer with.
 
 A resource server in another process asks the server's introspection
-endpoint instead. Serve `introspection-handler` with the
+endpoint instead. Serve `server/introspection-handler` with the
 `:resource-tokens` that resource servers may ask with, and give
 `access!` the `:introspection-endpoint` and one `:resource-token` in place
 of the `:tokens`.

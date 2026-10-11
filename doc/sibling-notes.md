@@ -58,12 +58,13 @@ wary-fetch
   `url/query-pairs`.
 - **The parts of a URL.** Needed the parts as written, before a parser
   tidies them: whether a URL has a port, a user name, a fragment, or a
-  `..` segment, also percent-encoded. Did instead: `indieauth/url-parts`
-  and `authority-parts`, by RFC 3986, appendix B. Could offer:
-  `url/parts`, beside `origin` and `host`.
+  `..` segment, also percent-encoded. Did instead: `indieauth/url-parts`,
+  by RFC 3986, appendix B, with the host, port and user information of
+  the authority. Could offer: `url/parts`, beside `origin` and `host`.
 - **Ring helpers.** Needed the bytes of a request's body up to a limit, a
-  form as pairs, plain and JSON answers, and a handler whose function can
-  give a promise in ClojureScript. Did instead: `indieauth/ring.cljc`,
+  form as pairs, plain and JSON answers, and a handler built from a map
+  of request methods, whose 405 lists them, and whose functions can give
+  promises in ClojureScript. Did instead: `indieauth/ring.cljc`,
   grown from websub-clj's `ring.cljc`. Webmention's receiving endpoint
   needs the same. Could offer: a `wary-fetch.ring` for the server side of
   a request, if that fits wary-fetch's purpose; else a small library of
