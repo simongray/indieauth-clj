@@ -119,6 +119,7 @@
                                             "<body><p>A comment" (metadata-link "https://decoy.example/metadata")))
    "https://user.example/none" (t/page "<p>No server")
    "https://user.example/bad-metadata" (t/page (metadata-link "https://elsewhere.example/meta"))
+   "https://user.example/lost-metadata" (t/page (metadata-link "https://auth.example/missing"))
    "https://user.example/gone" (constantly {:status 410 :headers {} :body ""})
    "https://user.example/c402" (t/page (metadata-link metadata-url))
    "https://another.example/" (t/page (metadata-link metadata-url))
@@ -237,6 +238,10 @@
                (fn [d _]
                  (testing "metadata whose issuer isn't a prefix of its URL"
                    (is (= ::indieauth/invalid-metadata (-> d :error :type))))))
+   (discovered "https://user.example/lost-metadata"
+               (fn [d _]
+                 (testing "metadata that fails"
+                   (is (= {:type ::indieauth/failed :status 404} (select-keys (:error d) [:type :status]))))))
    (discovered "https://user.example/gone"
                (fn [d _]
                  (testing "a page that fails"
@@ -378,6 +383,11 @@
                                                    (assoc "error" "access_denied" "error_description" "The user said no"))))))
   (testing "C306: a state that the client never made"
     (is (= ::indieauth/state-mismatch (:type (indieauth/callback-problem session (assoc callback "state" "made-up"))))))
+  (testing "an error without a description"
+    (is (= "The server answered server_error"
+           (:reason (indieauth/callback-problem session (-> (dissoc callback "code") (assoc "error" "server_error")))))))
+  (testing "no code"
+    (is (= ::indieauth/no-code (:type (indieauth/callback-problem session (dissoc callback "code"))))))
   (testing "the older links name no issuer"
     (is (nil? (indieauth/callback-problem (dissoc session :issuer) (dissoc callback "iss"))))))
 
@@ -431,6 +441,10 @@
              (fn [a _]
                (testing "C403: a me that names another server"
                  (is (= ::indieauth/unconfirmed (-> a :error :type))))))
+   (redeemed session callback 200 (assoc answer :me "https://user.example/gone")
+             (fn [a _]
+               (testing "a me whose page fails"
+                 (is (= ::indieauth/unconfirmed (-> a :error :type))))))
    (redeemed session callback 200 (assoc answer :me "https://another.example")
              (fn [a _]
                (testing "C404: a me on another domain that names this server"
@@ -457,6 +471,10 @@
                (testing "C409: an error of the token endpoint"
                  (is (= {:type ::indieauth/redemption-error :code "invalid_grant" :status 400 :reason "The code is used"}
                         (:error a))))))
+   #(async/then (indieauth/redeem! session callback (world (atom []) {"https://tokens.example/token" (t/page "<p>Hi")}))
+                (fn [a]
+                  (testing "an answer that isn't JSON"
+                    (is (= ::indieauth/redemption-error (-> a :error :type))))))
    (redeemed (assoc session :scope "profile") callback 200 {:me "https://user.example/" :profile {:name "A user"}}
              (fn [a _]
                (testing "C410: a code without a token scope, at the authorization endpoint"
@@ -478,7 +496,9 @@
                                              :client-name "An app"
                                              :redirect-uris ["https://login.app.example/callback"]))))
     (is (thrown? #?(:clj Exception :cljs :default)
-                 (indieauth/client-metadata (assoc client :client-uri "https://elsewhere.example/")))))
+                 (indieauth/client-metadata (assoc client :client-uri "https://elsewhere.example/"))))
+    (is (thrown? #?(:clj Exception :cljs :default)
+                 (indieauth/client-metadata (assoc client :client-id "https://app.example/#x")))))
   (let [handler (indieauth/client-metadata-handler client)
         r       (handler {:request-method :get :uri "/"})]
     (is (= 200 (:status r)))
@@ -540,7 +560,13 @@
      #(async/then (indieauth/revoke! (dissoc session :token-endpoint) "a-token" opts)
                   (fn [a]
                     (testing "a server without either"
-                      (is (= ::indieauth/no-revocation-endpoint (-> a :error :type)))))))))
+                      (is (= ::indieauth/no-revocation-endpoint (-> a :error :type))))))
+     #(async/then (indieauth/revoke! session "a-token"
+                                     {:send (t/network {"https://tokens.example/token" (recorder requests 503 {})})})
+                  (fn [a]
+                    (testing "a server that fails"
+                      (is (= {:type ::indieauth/revocation-error :status 503}
+                             (select-keys (:error a) [:type :status])))))))))
 
 (deftest userinfo
   (let [requests (atom [])
@@ -564,4 +590,8 @@
      #(async/then (indieauth/userinfo! (dissoc session :userinfo-endpoint) "a-token" (opts 200 profile))
                   (fn [a]
                     (testing "a server without a userinfo endpoint"
-                      (is (= ::indieauth/no-userinfo-endpoint (-> a :error :type)))))))))
+                      (is (= ::indieauth/no-userinfo-endpoint (-> a :error :type))))))
+     #(async/then (indieauth/userinfo! session "a-token" {:send (t/network {"https://auth.example/userinfo" (t/page "<p>Hi")})})
+                  (fn [a]
+                    (testing "an answer that isn't JSON"
+                      (is (= ::indieauth/userinfo-error (-> a :error :type)))))))))

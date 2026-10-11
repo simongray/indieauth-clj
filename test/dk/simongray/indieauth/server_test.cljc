@@ -1,7 +1,8 @@
 (ns dk.simongray.indieauth.server-test
   "The server: its metadata, the authorization request, consent and codes,
   the token endpoint, refresh tokens, revocation, introspection and
-  userinfo, the stores, client information and profile information. A
+  userinfo, the stores, client information, profile information and the
+  shapes of Ring requests. A
   case of indieauth.rocks's server tests is named by its number, with
   clients of the test's own."
   (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
@@ -32,6 +33,10 @@
                                          "<a class='u-url p-name' href=/>An HTML app</a></div>"))
    "https://liar.example/"  (t/json-doc {:client_id     "https://other.example/"
                                          :redirect_uris ["https://evil.example/callback"]})
+   "https://apps.example/"  (t/page (str "<div class=h-app><a class='u-url p-name' href=https://maker.example/>A maker</a></div>"
+                                         "<div class=h-app><a class='u-url p-name' href=/>The app</a></div>"))
+   "https://bare.example/"  (t/page "<div class=h-app><span class=p-name>A bare app</span></div>")
+   "https://text.example/"  (constantly {:status 200 :headers {"Content-Type" "text/plain"} :body "An app"})
    "https://user.example/"  (t/page (str "<link rel=me href=https://social.example/@ann>"
                                          "<div class=h-card><a class='u-url p-name' href=/>Ann</a>"
                                          "<img class=u-photo src=/ann.jpg alt=''>"
@@ -220,6 +225,22 @@
              (testing "a redirect URL that a browser runs"
                (is (= 400 (:status r)))))))))
 
+(deftest without-client-info
+  (let [log  (atom [])
+        opts (assoc (server-opts (atom noon) log) :client-info? false)]
+    (run
+     #(async/then (authorize opts (request-params))
+                  (fn [r]
+                    (testing "without :client-info?, a redirect URL on the client's host needs no fetch"
+                      (is (= 200 (:status r)))
+                      (is (= {:client-id "https://app.example/"} (:client (checked r))))
+                      (is (empty? @log)))))
+     #(async/then (authorize opts (request-params "redirect_uri" "https://login.app.example/callback"))
+                  (fn [r]
+                    (testing "but one on another host does"
+                      (is (= 200 (:status r)))
+                      (is (= ["https://app.example/"] (map :url @log)))))))))
+
 (defn- error-redirect
   "A step that sends the authorization request of `params` to a new server
   and calls `f` with the query parameters of the redirect it gives."
@@ -267,6 +288,10 @@
                    (fn [q]
                      (testing "email without profile"
                        (is (= "invalid_scope" (q "error"))))))
+   (error-redirect (request-params "scope" "profile a\"b")
+                   (fn [q]
+                     (testing "RFC 6749, section 3.3: a scope with a character that a scope can't have"
+                       (is (= "invalid_scope" (q "error"))))))
    (error-redirect (conj (vec (request-params)) ["scope" "create"])
                    (fn [q]
                      (testing "another repeated parameter"
@@ -284,6 +309,12 @@
 
 (deftest consent-and-codes
   (let [opts (server-opts)]
+    (testing "consent for a user who isn't a profile URL"
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (server/consent {:client-id "https://app.example/"} "https://user.example:8443/" opts))))
+    (testing "an authorization endpoint without :authorize"
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (server/handler (dissoc opts :authorize)))))
     (run
      #(async/then (server/authorization-request! (request-params "scope" "profile email create") opts)
                   (fn [{:keys [request]}]
@@ -445,6 +476,18 @@
                   (fn [r]
                     (testing "S331: another grant_type"
                       (fail? r "unsupported_grant_type"))))
+     #(async/then (redeem token (dissoc (redemption "?code=c") "redirect_uri"))
+                  (fn [r]
+                    (testing "no redirect_uri"
+                      (fail? r "invalid_request"))))
+     #(async/then (redeem token (conj (vec (redemption "?code=c")) ["code" "d"]))
+                  (fn [r]
+                    (testing "RFC 6749, section 3.2: a repeated parameter"
+                      (fail? r "invalid_request"))))
+     #(async/then (redeem (server/token-handler (assoc opts :max-form-bytes 64)) (redemption "?code=c"))
+                  (fn [r]
+                    (testing "a form that's too large"
+                      (is (= 413 (:status r))))))
      #(async/then (token {:request-method :get :query-string (url/query-string (redemption "?code=c"))})
                   (fn [r]
                     (testing "S333: not a GET"
@@ -468,7 +511,21 @@
                                (testing "section 5.3.2: the me and the profile, from an older client too"
                                  (is (= 200 (:status r)))
                                  (is (= {:me "https://user.example/" :profile {:name "Ann" :url "https://user.example/"}}
-                                        (answer r)))))))))))
+                                        (answer r))))
+                               (async/then (redeem h (redemption redirect))
+                                           (fn [r]
+                                             (testing "S302 there too: a code works once"
+                                               (is (= "invalid_grant" (:error (answer r)))))))))))
+     (approved opts (request-params "scope" "profile") "https://user.example/" {:me "https://user.example/"}
+               (fn [{:keys [redirect]}]
+                 (async/then (redeem h (redemption redirect "code_verifier" (str/reverse verifier)))
+                             (fn [r]
+                               (testing "S310 there too: a wrong verifier"
+                                 (is (= "invalid_grant" (:error (answer r)))))))))
+     #(async/then (redeem h (redemption "?code=c" "grant_type" "refresh_token"))
+                  (fn [r]
+                    (testing "and no other grant"
+                      (is (= "unsupported_grant_type" (:error (answer r))))))))))
 
 (deftest stores
   (let [clock (atom noon)
@@ -498,6 +555,18 @@
                               :logo-uri      "https://app.example/logo.png"
                               :redirect-uris ["https://login.app.example/callback" "https://login.app.example/q?keep=1"]}
                              info)))))
+     #(async/then (server/client-info! "https://apps.example/" opts)
+                  (fn [info]
+                    (testing "the h-app of the client, before others on its page"
+                      (is (= "The app" (:client-name info))))))
+     #(async/then (server/client-info! "https://bare.example/" opts)
+                  (fn [info]
+                    (testing "or else the first"
+                      (is (= {:client-id "https://bare.example/" :client-name "A bare app" :redirect-uris []} info)))))
+     #(async/then (server/client-info! "https://text.example/" opts)
+                  (fn [info]
+                    (testing "a page that's neither JSON nor HTML"
+                      (is (= {:client-id "https://text.example/" :redirect-uris []} info)))))
      #(async/then (server/client-info! "https://liar.example/" opts)
                   (fn [info]
                     (testing "a document for another client"
@@ -512,7 +581,51 @@
                     (fn [info]
                       (testing "section 4.2: a loopback client isn't fetched"
                         (is (= {:client-id "http://127.0.0.1:8080/" :redirect-uris []} info))
+                        (is (empty? @log))))))
+     #(let [log (atom [])]
+        (async/then (server/client-info! "http://localhost:3000/" {:send (t/network clients log)})
+                    (fn [_]
+                      (testing "nor one on localhost"
                         (is (empty? @log)))))))))
+
+(defn- async-response
+  "The response that the Ring handler `h` gives `request` as an
+  asynchronous handler, or what it raises, as a value or a promise, or
+  ::timeout on the JVM when it does neither."
+  [h request]
+  #?(:clj  (let [p (promise)]
+             (h request #(deliver p %) #(deliver p %))
+             (deref p 10000 ::timeout))
+     :cljs (js/Promise. (fn [resolve _] (h request resolve resolve)))))
+
+(deftest ring-requests
+  (let [opts (server-opts)]
+    (run
+     #(async/then ((server/handler opts) {:request-method :get :query-params (request-params)})
+                  (fn [r]
+                    (testing "a query that wrap-params has read"
+                      (is (= 200 (:status r))))))
+     #(async/then ((server/token-handler opts) {:request-method :post :form-params {:grant_type "password"}})
+                  (fn [r]
+                    (testing "a form that wrap-params has read"
+                      (is (= "unsupported_grant_type" (:error (answer r)))))))
+     #(async/then ((server/token-handler opts) {:request-method :post :body (bytes/encode "grant_type=password")})
+                  (fn [r]
+                    (testing "a body of bytes"
+                      (is (= "unsupported_grant_type" (:error (answer r)))))))
+     #(async/then ((server/revocation-handler opts) {:request-method :post})
+                  (fn [r]
+                    (testing "no body"
+                      (is (= "invalid_request" (:error (answer r)))))))
+     #(async/then (async-response (server/metadata-handler opts) {:request-method :get})
+                  (fn [r]
+                    (testing "an asynchronous handler"
+                      (is (= 200 (:status r))))))
+     #(async/then (async-response (server/handler (assoc opts :authorize (fn [_ _] (throw (ex-info "The page broke" {})))))
+                                  {:request-method :get :query-string (url/query-string (request-params))})
+                  (fn [e]
+                    (testing "which raises what a function of yours throws"
+                      (is (= "The page broke" (ex-message e)))))))))
 
 (deftest profiles
   (is (nil? (server/profile {:url "https://user.example/" :body "<p class=h-card><a class=u-url href=https://other.example/>B</a>"}))
@@ -619,6 +732,14 @@
                       (testing "section 5.5.1: the new refresh token keeps the scopes of the old"
                         (is (= "profile create update" (:scope a))))
                       (reset! newest a))))
+     #(async/then (post token (dissoc (refresh-fields (:refresh_token @newest)) "client_id"))
+                  (fn [r]
+                    (testing "no client_id"
+                      (is (= "invalid_request" (:error (answer r)))))))
+     #(async/then (post token (refresh-fields (:refresh_token @newest) "scope" "a\"b"))
+                  (fn [r]
+                    (testing "a scope with a character that a scope can't have"
+                      (is (= "invalid_scope" (:error (answer r)))))))
      #(async/then (post token (refresh-fields (:refresh_token @first)))
                   (fn [r]
                     (testing "S504: an old refresh token stops working"
@@ -630,6 +751,24 @@
      #(async/then (post token (refresh-fields (:refresh_token @newest)))
                   (fn [r]
                     (is (= "invalid_grant" (:error (answer r)))))))))
+
+(deftest refresh-races
+  (let [a     (atom {})
+        clock (atom noon)
+        opts  (assoc (phase-2-opts clock) :tokens (server/memory-store a #(deref clock)))
+        b     (atom nil)]
+    (run
+     (signed-in opts "create" #(reset! b %))
+     #(async/then (post (server/token-handler (assoc-in opts [:tokens :take!] (constantly nil)))
+                        (refresh-fields (:refresh_token @b)))
+                  (fn [r]
+                    (testing "a refresh token that another refresh took first"
+                      (is (= "invalid_grant" (:error (answer r)))))))
+     #(do (swap! a (fn [m] (into {} (remove (fn [[k _]] (str/starts-with? k "grant:"))) m)))
+          (async/then (post (server/token-handler opts) (refresh-fields (:refresh_token @b)))
+                      (fn [r]
+                        (testing "a grant revoked while its refresh token is checked"
+                          (is (= "invalid_grant" (:error (answer r)))))))))))
 
 (deftest token-lifetimes
   (let [clock (atom noon)

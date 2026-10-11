@@ -1,13 +1,14 @@
 (ns dk.simongray.indieauth.resource-test
   "The checks of an access token that a resource server makes, in the
-  store of a server in the same process. Those at an introspection
-  endpoint are in the server's tests."
+  store of a server in the same process, and at introspection endpoints
+  that misbehave. Those at the library's own introspection endpoint are in
+  the server's tests."
   (:require [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.server :as server]
-            [dk.simongray.indieauth.test-support :refer [run]]
+            [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]))
 
 (def noon #inst "2026-10-11T12:00:00Z")
@@ -70,3 +71,38 @@
                       (fn [i]
                         (testing "an expired token"
                           (is (nil? i)))))))))
+
+(defn- endpoint-opts
+  "The options of a resource server whose introspection endpoint answers
+  by the Ring handler `h`."
+  [h]
+  {:introspection-endpoint "https://auth.example/introspect"
+   :resource-token         "the-token-of-a-resource-server"
+   :send                   (t/network {"https://auth.example/introspect" h})})
+
+(deftest introspection-answers
+  (let [at  (quot (inst-ms noon) 1000)
+        ask #(resource/access! {:headers {"authorization" "Bearer the-token"}} ["create"] %)]
+    (run
+     #(async/then (resource/introspect! "the-token"
+                                        (endpoint-opts (t/json-doc {:active    "true"
+                                                                    :me        "https://user.example/"
+                                                                    :client_id "https://app.example/"
+                                                                    :scope     "create update"
+                                                                    :iat       (str at)
+                                                                    :exp       (str (+ at 3600))})))
+                  (fn [i]
+                    (testing "section 6.2: true and numbers as texts, as its example writes them"
+                      (is (= info i)))))
+     #(async/then (resource/introspect! "the-token" (endpoint-opts (t/json-doc {:active true})))
+                  (fn [i]
+                    (testing "an active token without a me"
+                      (is (nil? i)))))
+     #(async/then (ask (endpoint-opts (t/page "<p>Hi")))
+                  (fn [a]
+                    (testing "an answer that isn't JSON"
+                      (is (= 503 (get-in a [:response :status]))))))
+     #(async/then (ask (assoc (endpoint-opts nil) :send (fn [_] (throw (ex-info "Connection refused" {})))))
+                  (fn [a]
+                    (testing "an endpoint that can't be reached"
+                      (is (= 503 (get-in a [:response :status])))))))))
