@@ -5,10 +5,12 @@
 
   The code follows the IndieAuth Living Standard of 11 July 2024 at
   https://indieauth.spec.indieweb.org/ and cites its sections. The server
-  is in dk.simongray.indieauth.server."
+  is in dk.simongray.indieauth.server, and the checks of a resource server
+  in dk.simongray.indieauth.resource."
   (:require [clojure.string :as str]
             [dk.simongray.html-pieces :as html]
             [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.instant :as instant]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.links :as links]
             [dk.simongray.indieauth.ring :as ring]
@@ -19,32 +21,32 @@
             [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]))
 
+;;; identifiers
+
 ;; RFC 3986, appendix B
 (defn ^:no-doc url-parts
-  "The parts of the URL `s` as a map of :scheme, :authority, :path, :query
-  and :fragment, each nil when the URL has none, or nil when `s` has no
-  scheme. The scheme is in lower case."
+  "The parts of the URL `s` as a map of :scheme, :authority, :userinfo,
+  :host, :port, :path, :query and :fragment, each nil when the URL has
+  none, or nil when `s` has no scheme. The scheme is in lower case."
   [s]
-  (when-let [[_ scheme _ authority path _ query _ fragment]
-             (re-matches #"(?s)([a-zA-Z][a-zA-Z0-9+.\-]*):(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?"
+  (when-let [[_ scheme authority path query fragment]
+             (re-matches #"(?s)([a-zA-Z][a-zA-Z0-9+.\-]*):(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?"
                          (str s))]
-    {:scheme    (str/lower-case scheme)
-     :authority authority
-     :path      path
-     :query     query
-     :fragment  fragment}))
+    (let [[_ userinfo host port] (some->> authority
+                                          (re-matches #"(?s)(?:(.*)@)?(\[[^\]]*\]|[^:]*)(?::(.*))?"))]
+      {:scheme    (str/lower-case scheme)
+       :authority authority
+       :userinfo  userinfo
+       :host      host
+       :port      port
+       :path      path
+       :query     query
+       :fragment  fragment})))
 
-(defn ^:no-doc authority-parts
-  "The user information, host and port of the `authority` of a URL, as a
-  map of :userinfo, :host and :port, each nil when it has none."
-  [authority]
-  (let [at       (str/last-index-of authority "@")
-        userinfo (when at (subs authority 0 at))
-        hostport (if at (subs authority (inc at)) authority)
-        [_ host port] (re-matches #"(\[[^\]]*\]|[^:]*)(?::(.*))?" hostport)]
-    {:userinfo userinfo
-     :host     host
-     :port     port}))
+(def ^:no-doc unsafe-characters
+  "The characters that a URL of IndieAuth never has as they are: spaces,
+  control characters and backslashes, which a browser reads otherwise."
+  #"[\x00-\x20\x7f\\]")
 
 (defn- domain-name?
   "Whether the `host` of a URL is a domain name: labels between dots, of
@@ -63,21 +65,21 @@
   [segment]
   (boolean (re-matches #"(?i)(\.|%2e){1,2}" segment)))
 
-(defn- identifier-problem
-  "What's wrong with `s` as the URL of a user or a client, by the rules
-  that both share, or nil. An empty path is /, as section 3.4 has it."
+;; IndieAuth 3.2 and 3.3, with an empty path as /, as section 3.4 has it
+(defn- identifier-parts
+  "The parts of `s` as url-parts gives them, if it passes the rules that
+  profile URLs and client identifiers share: an http or https URL with a
+  host, and without a fragment, a user name, a password, a . or ..
+  segment in its path, or a character of unsafe-characters. Else nil."
   [s]
-  (let [{:keys [scheme authority path fragment]} (url-parts s)
-        {:keys [userinfo host]} (some-> authority authority-parts)]
-    (cond
-      (not (string? s))                          "isn't a text"
-      (re-find #"[\x00-\x20\x7f\\]" s)           "has a space, a control character or a backslash"
-      (not (#{"http" "https"} scheme))           "isn't an http or https URL"
-      (nil? authority)                           "has no host"
-      (some dot-segment? (str/split path #"/"))  "has a . or .. path segment"
-      (some? fragment)                           "has a fragment"
-      (some? userinfo)                           "has a user name or a password"
-      (empty? host)                              "has no host")))
+  (when (and (string? s) (not (re-find unsafe-characters s)))
+    (let [{:keys [scheme userinfo host path fragment] :as parts} (url-parts s)]
+      (when (and (#{"http" "https"} scheme)
+                 (seq host)
+                 (nil? userinfo)
+                 (nil? fragment)
+                 (not-any? dot-segment? (str/split path #"/")))
+        parts))))
 
 ;; IndieAuth 3.2
 (defn profile-url?
@@ -88,11 +90,8 @@
       (profile-url? \"https://example.com/users?id=100\") ;; => true
       (profile-url? \"https://example.com:8443/\")        ;; => false"
   [s]
-  (boolean
-   (when-not (identifier-problem s)
-     (let [{:keys [host port]} (authority-parts (:authority (url-parts s)))]
-       (and (nil? port)
-            (domain-name? host))))))
+  (let [{:keys [host port]} (identifier-parts s)]
+    (boolean (and host (nil? port) (domain-name? host)))))
 
 (def ^:no-doc loopback-hosts
   "The IP addresses that a client identifier may have as its host."
@@ -105,26 +104,25 @@
   password, or a . or .. segment in its path. Unlike a profile URL, it
   can have a port."
   [s]
-  (boolean
-   (when-not (identifier-problem s)
-     (let [{:keys [host port]} (authority-parts (:authority (url-parts s)))]
-       (and (or (nil? port)
-                (and (re-matches #"\d{1,5}" port) (<= (parse-long port) 65535)))
-            (or (domain-name? host)
-                (contains? loopback-hosts host)))))))
+  (let [{:keys [host port]} (identifier-parts s)]
+    (boolean (and host
+                  (or (nil? port)
+                      (some-> (re-matches #"\d{1,5}" port) parse-long (<= 65535)))
+                  (or (domain-name? host)
+                      (contains? loopback-hosts host))))))
 
 ;; IndieAuth 3.1; RFC 9207, section 2
 (defn issuer?
   "Whether `s` is a valid issuer identifier of a server: an https URL with
   a host, and without a query or a fragment."
   [s]
-  (let [{:keys [scheme authority query fragment]} (url-parts s)]
+  (let [{:keys [scheme host query fragment]} (url-parts s)]
     (boolean (and (string? s)
                   (= "https" scheme)
-                  (seq (:host (some-> authority authority-parts)))
+                  (seq host)
                   (nil? query)
                   (nil? fragment)
-                  (not (re-find #"[\x00-\x20\x7f\\]" s))))))
+                  (not (re-find unsafe-characters s))))))
 
 ;; RFC 8414, section 3.1
 (defn well-known-url
@@ -170,13 +168,12 @@
 
       (canonical-url \"Example.com\") ;; => \"https://example.com/\""
   [s]
-  (let [s    (str/trim (str s))
-        s    (if (or (re-find #"(?i)^https?://" s)
-                     (re-find #"^[a-zA-Z][a-zA-Z0-9+.\-]*:(?!\d)" s))
-               s
-               (str "https://" s))
-        {:keys [scheme authority path query fragment]} (url-parts s)
-        {:keys [userinfo host port]} (some-> authority authority-parts)]
+  (let [s (str/trim (str s))
+        s (if (or (re-find #"(?i)^https?://" s)
+                  (re-find #"^[a-zA-Z][a-zA-Z0-9+.\-]*:(?!\d)" s))
+            s
+            (str "https://" s))
+        {:keys [scheme userinfo host port path query fragment]} (url-parts s)]
     (when (and (#{"http" "https"} scheme) (seq host))
       (str scheme "://"
            (some-> userinfo (str "@"))
@@ -186,6 +183,8 @@
            (if (empty? path) "/" path)
            (some->> query (str "?"))
            (some->> fragment (str "#"))))))
+
+;;; secrets, PKCE and scopes
 
 (defn token
   "A random text of `n` bytes, 32 by default, that nobody can guess, e.g.
@@ -215,15 +214,15 @@
   "The S256 code challenge of the code `verifier`: its SHA-256 in the
   URL-safe letters of base64."
   [verifier]
-  (bytes/base64url (bytes/sha256 (bytes/encode verifier))))
+  (bytes/hash-text verifier))
 
 ;; RFC 6749, section 3.3
 (defn scopes
-  "The scopes in the text `s`, a list separated by spaces, as a vector
-  without repeats. It's empty when `s` is blank or nil, and nil when a
-  scope has a character that a scope can't have."
-  [s]
-  (let [xs (remove empty? (str/split (str s) #" +"))]
+  "The scopes of `x`, a text of scopes separated by spaces, or a collection
+  of them, as a vector without repeats. It's empty when there are none, and
+  nil when a scope has a character that a scope can't have."
+  [x]
+  (let [xs (re-seq #"[^ ]+" (if (string? x) x (str/join " " x)))]
     (when (every? #(re-matches #"[\x21\x23-\x5B\x5D-\x7E]+" %) xs)
       (vec (distinct xs)))))
 
@@ -253,6 +252,8 @@
   [scopes]
   (boolean (some (complement profile-scopes) scopes)))
 
+;;; discovery
+
 (def default-options
   "The default of each option of a client that has one, which follows
   IndieAuth:
@@ -278,8 +279,7 @@
    :max-page-bytes   (* 2 1024 1024)
    :max-json-bytes   (* 256 1024)
    :send             http/send-public!
-   :now-fn           #?(:clj  #(java.util.Date.)
-                        :cljs #(js/Date.))})
+   :now-fn           instant/now})
 
 (defn- failure
   "A map of the :error of `type`, a keyword, with the `reason` and the facts
@@ -295,17 +295,16 @@
   [url accept max-bytes opts]
   (async/then (async/attempt
                #(http/fetch! url (assoc opts :accept accept :max-bytes max-bytes)))
-              (fn [{:keys [value error]}]
+              (fn [{{:keys [status] :as response} :value error :error}]
                 (cond
                   error
                   {:error (http/failure error)}
 
-                  (not (<= 200 (:status value) 299))
-                  (failure ::failed (str url " answered " (:status value))
-                           {:url url :status (:status value)})
+                  (not (ring/success? status))
+                  (failure ::failed (str url " answered " status) {:url url :status status})
 
                   :else
-                  value))))
+                  response))))
 
 (defn- exchange!
   "The response to the `request`, sent by `opts` without following a
@@ -339,8 +338,8 @@
   ([response]
    (endpoints response {}))
   ([response opts]
-   (let [nodes     (page-nodes response)
-         first-url #(first (links/rel-urls % response nodes opts))]
+   (let [all       (links/links response (page-nodes response) opts)
+         first-url #(first (links/hrefs % all))]
      (if-let [metadata-url (first-url "indieauth-metadata")]
        {:metadata-url metadata-url}
        ;; the links of earlier versions of IndieAuth
@@ -370,43 +369,42 @@
     (and (some? token_endpoint) (not (url/web-url? token_endpoint)))
     "The token endpoint isn't an http or https URL"))
 
+(defn- metadata-server
+  "The server that the `metadata` from `metadata-url` describes, over the
+  `discovery` that found it."
+  [discovery metadata metadata-url]
+  (let [{:keys [issuer authorization_endpoint token_endpoint
+                revocation_endpoint userinfo_endpoint]} metadata]
+    (cond-> (assoc discovery
+                   :metadata-url           metadata-url
+                   :metadata               metadata
+                   :issuer                 issuer
+                   :authorization-endpoint authorization_endpoint
+                   :token-endpoint         token_endpoint)
+      (url/web-url? revocation_endpoint) (assoc :revocation-endpoint revocation_endpoint)
+      (url/web-url? userinfo_endpoint)   (assoc :userinfo-endpoint userinfo_endpoint))))
+
 (defn- server!
-  "The server that the `found` endpoints of the page of `me` name, as
-  discover! gives it with the `base` of what it found before, by `opts`."
-  [found base {:keys [max-json-bytes] :as opts}]
-  (let [{:keys [metadata-url authorization-endpoint]} found]
-    (cond
-      metadata-url
-      (async/then (fetch! metadata-url "application/json" max-json-bytes opts)
-                  (fn [{:keys [error body] :as response}]
-                    (let [metadata (json/read-object body)
-                          problem  (metadata-problem metadata metadata-url)]
-                      (cond
-                        error
-                        response
-
-                        problem
+  "The server of the `found` endpoints, over the `discovery` that found
+  them, which fetches its metadata by `opts`."
+  [{:keys [metadata-url authorization-endpoint] :as found} discovery
+   {:keys [max-json-bytes] :as opts}]
+  (cond
+    metadata-url
+    (async/then (fetch! metadata-url "application/json" max-json-bytes opts)
+                (fn [{:keys [error body] :as response}]
+                  (if error
+                    response
+                    (let [metadata (json/read-object body)]
+                      (if-let [problem (metadata-problem metadata metadata-url)]
                         (failure ::invalid-metadata problem {:url metadata-url})
+                        (metadata-server discovery metadata metadata-url))))))
 
-                        :else
-                        (cond-> (merge base
-                                       {:metadata-url           metadata-url
-                                        :metadata               metadata
-                                        :issuer                 (:issuer metadata)
-                                        :authorization-endpoint (:authorization_endpoint metadata)
-                                        :token-endpoint         (:token_endpoint metadata)})
-                          (url/web-url? (:revocation_endpoint metadata))
-                          (assoc :revocation-endpoint (:revocation_endpoint metadata))
+    (url/web-url? authorization-endpoint)
+    (merge discovery found)
 
-                          (url/web-url? (:userinfo_endpoint metadata))
-                          (assoc :userinfo-endpoint (:userinfo_endpoint metadata)))))))
-
-      (url/web-url? authorization-endpoint)
-      (merge base found)
-
-      :else
-      (failure ::no-server "The page names no IndieAuth server"
-               {:url (:me base)}))))
+    :else
+    (failure ::no-server "The page names no IndieAuth server" {:url (:me discovery)})))
 
 ;; IndieAuth 4.1 and 5.1
 (defn discover!
@@ -428,16 +426,13 @@
   ([url]
    (discover! url {}))
   ([url opts]
-   (let [{:keys [profile-url-pred max-page-bytes] :as opts} (merge default-options
-                                                                   opts)
-         me (canonical-url url)]
+   (let [{:keys [profile-url-pred max-page-bytes] :as opts} (merge default-options opts)
+         me                                                (canonical-url url)]
      (if-not (and me (profile-url-pred me))
-       (async/then nil (constantly (failure ::invalid-url
-                                            (str "Not a profile URL: " url)
-                                            {:url url})))
+       (async/then (failure ::invalid-url (str "Not a profile URL: " url) {:url url})
+                   identity)
        (async/then
-        (fetch! me "text/html, application/xhtml+xml;q=0.9, */*;q=0.1"
-                max-page-bytes opts)
+        (fetch! me "text/html, application/xhtml+xml;q=0.9, */*;q=0.1" max-page-bytes opts)
         (fn [{:keys [error redirects] :as response}]
           (if error
             response
@@ -448,17 +443,29 @@
                                                    [(:url response)])))}
                      opts))))))))
 
-(def ^:no-doc session-kind
-  "The kind of a signed state that carries a session."
-  ::session)
+;;; signing in
 
-(defn- fingerprint
-  "The SHA-256 of the text `s` in the URL-safe letters of base64."
-  [s]
-  (bytes/base64url (bytes/sha256 (bytes/encode s))))
+(defn- signed-verifier
+  "The PKCE code verifier of the signed `state`, which only the `secret`
+  gives."
+  [secret state]
+  (signed/derive-text secret "code_verifier" state))
 
 ;; IndieAuth 5.2.1: the state can hold the session; RFC 9700, section
 ;; 4.7.1: a state that is bound to the browser
+(defn- new-state
+  "The :state and the PKCE :code-verifier of the `session`, and with a
+  `secret`, the :nonce of a state that carries the session, signed at the
+  instant `at`."
+  [session secret at]
+  (if secret
+    (let [nonce (token)
+          state (signed/sign secret ::session
+                             (assoc session :nonce (bytes/hash-text nonce))
+                             at)]
+      {:state state :code-verifier (signed-verifier secret state) :nonce nonce})
+    {:state (token) :code-verifier (code-verifier)}))
+
 (defn state-session
   "The session that the signed `state` carries, which authorization-request
   gave with the `secret`, if the `nonce` is the session's, or nil. It's nil
@@ -470,32 +477,24 @@
    (state-session secret state nonce {}))
   ([secret state nonce opts]
    (let [{:keys [session-seconds now-fn]} (merge default-options opts)
-         m (signed/unsign secret session-kind state (now-fn) session-seconds)]
+         m (signed/unsign secret ::session state (now-fn) session-seconds)]
      (when (and m
                 (string? nonce)
-                (bytes/same? (bytes/encode (fingerprint nonce))
-                             (bytes/encode (str (:nonce m)))))
+                (bytes/same-text? (bytes/hash-text nonce) (:nonce m)))
        (assoc m
               :nonce         nonce
               :state         state
-              :code-verifier (signed/derive-text secret "code_verifier" state))))))
+              :code-verifier (signed-verifier secret state))))))
 
 (defn- request-problem
   "What's wrong with the options of an authorization request: its
   `client-id`, `redirect-uri` and `scopes`, or nil."
   [client-id redirect-uri scopes]
   (cond
-    (not (client-id? client-id))
-    "The :client-id isn't a valid client identifier"
-
-    (not (url/web-url? redirect-uri))
-    "The :redirect-uri isn't an http or https URL"
-
-    (nil? scopes)
-    "The :scope has a scope that isn't valid"
-
-    :else
-    (profile-scope-problem scopes)))
+    (not (client-id? client-id))       "The :client-id isn't a valid client identifier"
+    (not (url/web-url? redirect-uri))  "The :redirect-uri isn't an http or https URL"
+    (nil? scopes)                      "The :scope has a scope that isn't valid"
+    :else                              (profile-scope-problem scopes)))
 
 ;; IndieAuth 5.2
 (defn authorization-request
@@ -520,43 +519,34 @@
   [{:keys [me authorization-endpoint token-endpoint] :as discovery}
    {:keys [client-id redirect-uri scope secret] :as opts}]
   (let [{:keys [now-fn]} (merge default-options opts)
-        scopes           (scopes (if (string? scope) scope (str/join " " scope)))]
-    (when-let [problem (request-problem client-id redirect-uri scopes)]
+        asked            (scopes scope)]
+    (when-let [problem (request-problem client-id redirect-uri asked)]
       (throw (ex-info problem {:client-id    client-id
                                :redirect-uri redirect-uri
                                :scope        scope})))
-    (if (and (token-scope? scopes) (not (url/web-url? token-endpoint)))
+    (if (and (token-scope? asked) (not (url/web-url? token-endpoint)))
       (failure ::no-token-endpoint
                "The server has no token endpoint to give an access token"
                {:url authorization-endpoint})
-      (let [session  (merge (select-keys discovery [:me :urls :issuer
-                                                    :authorization-endpoint
-                                                    :token-endpoint
-                                                    :revocation-endpoint
-                                                    :userinfo-endpoint])
-                            {:client-id    client-id
-                             :redirect-uri redirect-uri
-                             :scope        (scope-text scopes)})
-            nonce    (when secret (token))
-            state    (if secret
-                       (signed/sign secret session-kind
-                                    (assoc session :nonce (fingerprint nonce))
-                                    (now-fn))
-                       (token))
-            verifier (if secret
-                       (signed/derive-text secret "code_verifier" state)
-                       (code-verifier))
-            session  (cond-> session nonce (assoc :nonce nonce))]
+      (let [session (merge (select-keys discovery [:me :urls :issuer
+                                                   :authorization-endpoint
+                                                   :token-endpoint
+                                                   :revocation-endpoint
+                                                   :userinfo-endpoint])
+                           {:client-id    client-id
+                            :redirect-uri redirect-uri
+                            :scope        (scope-text asked)})
+            {:keys [state code-verifier] :as fresh} (new-state session secret (now-fn))]
         {:url     (url/with-query authorization-endpoint
                     [["response_type" "code"]
                      ["client_id" client-id]
                      ["redirect_uri" redirect-uri]
                      ["state" state]
-                     ["code_challenge" (code-challenge verifier)]
+                     ["code_challenge" (code-challenge code-verifier)]
                      ["code_challenge_method" "S256"]
-                     ["scope" (scope-text scopes)]
+                     ["scope" (scope-text asked)]
                      ["me" me]])
-         :session (assoc session :state state :code-verifier verifier)}))))
+         :session (merge session fresh)}))))
 
 (defn- param
   "The value of the parameter `k` in `params`, a map whose keys are texts
@@ -577,16 +567,12 @@
   the user said no, is a problem of the type ::authorization-error, with
   the :code that the server gave."
   [{:keys [state issuer] :as session} params]
-  (let [given (param params "state")
-        iss   (param params "iss")
-        error (param params "error")]
+  (let [error (param params "error")]
     (cond
-      (not (and (string? given)
-                (string? state)
-                (bytes/same? (bytes/encode given) (bytes/encode state))))
+      (not (bytes/same-text? (param params "state") state))
       {:type ::state-mismatch :reason "The state isn't the one that the client sent"}
 
-      (and issuer (not= issuer iss))
+      (and issuer (not= issuer (param params "iss")))
       {:type ::issuer-mismatch :reason "The iss isn't the issuer of the server"}
 
       error
@@ -597,14 +583,6 @@
 
       (empty? (param params "code"))
       {:type ::no-code :reason "The server gave no code"})))
-
-(defn ^:no-doc redeem-at
-  "Where the `session` redeems its code: :token at the token endpoint for an
-  access token, or else :authorization at the authorization endpoint."
-  [{:keys [scope] :as session}]
-  (if (token-scope? (scopes scope))
-    :token
-    :authorization))
 
 (defn- form-request
   "The request map that posts the form of `fields`, pairs of a name and a
@@ -623,8 +601,8 @@
   endpoint for an access token, when the session asks for one, and else
   at the authorization endpoint for the profile URL alone. The body is a
   hidden text of wary-fetch, since it holds the code and the verifier."
-  [{:keys [client-id redirect-uri code-verifier] :as session} code]
-  (form-request (if (= :token (redeem-at session))
+  [{:keys [scope client-id redirect-uri code-verifier] :as session} code]
+  (form-request (if (token-scope? (scopes scope))
                   (:token-endpoint session)
                   (:authorization-endpoint session))
                 [["grant_type" "authorization_code"]
@@ -632,6 +610,16 @@
                  ["client_id" client-id]
                  ["redirect_uri" redirect-uri]
                  ["code_verifier" code-verifier]]))
+
+(defn- server-error
+  "The :error of `type` for the response of `status` with the JSON `m` of
+  an OAuth 2.0 error, with its :code and description, when it has them."
+  [type status m]
+  (failure type
+           (or (when (string? (:error_description m)) (:error_description m))
+               (str "The server answered " status))
+           (cond-> {:status status}
+             (string? (:error m)) (assoc :code (:error m)))))
 
 ;; IndieAuth 5.3.2 and 5.3.3; RFC 6749, section 5.2
 (defn redemption
@@ -650,16 +638,11 @@
          me                         (when (string? (:me m))
                                       (canonical-url (:me m)))]
      (cond
-       (not (and (integer? status) (<= 200 status 299)))
-       (failure ::redemption-error
-                (or (when (string? (:error_description m)) (:error_description m))
-                    (str "The server answered " status))
-                (cond-> {:status status}
-                  (string? (:error m)) (assoc :code (:error m))))
+       (not (ring/success? status))
+       (server-error ::redemption-error status m)
 
        (nil? m)
-       (failure ::redemption-error "The server's answer isn't a JSON object"
-                {:status status})
+       (failure ::redemption-error "The server's answer isn't a JSON object" {:status status})
 
        (nil? (:me m))
        (failure ::no-me "The server's answer has no me")
@@ -672,35 +655,29 @@
 
 ;; IndieAuth 5.4
 (defn confirm!
-  "Confirm that the server of the `session` may speak for the profile URL
-  `me` that it gave, with `opts`, and give a map of the :me, or of the
-  :error. In ClojureScript, it gives a promise.
+  "Confirm that the profile URL `me`, which the server of the `session`
+  gave, names that server, with `opts`, and give a map of the :me, or of
+  the :error. In ClojureScript, it gives a promise.
 
-  It may when `me` is the URL that the user gave, or one that discovery
+  It does when `me` is the URL that the user gave, or one that discovery
   went through, and else when the page of `me` names the same
   authorization endpoint."
   [{:keys [urls authorization-endpoint] :as session} me opts]
-  (let [seen (set (keep canonical-url (cons (:me session) urls)))]
-    (async/then (if (contains? seen me)
-                  {:me me}
-                  (discover! me opts))
+  (if (contains? (set (keep canonical-url (cons (:me session) urls))) me)
+    (async/then {:me me} identity)
+    (async/then (discover! me opts)
                 (fn [{:keys [error] :as found}]
                   (cond
-                    (contains? seen me)
-                    {:me me}
-
                     error
                     (failure ::unconfirmed
-                             (str "The page of " me " couldn't confirm it: "
-                                  (:reason error))
+                             (str "The page of " me " couldn't confirm it: " (:reason error))
                              {:me me})
 
                     (= authorization-endpoint (:authorization-endpoint found))
                     {:me me}
 
                     :else
-                    (failure ::unconfirmed (str "The page of " me
-                                                " names another server")
+                    (failure ::unconfirmed (str "The page of " me " names another server")
                              {:me me}))))))
 
 (defn redeem!
@@ -720,7 +697,7 @@
   ([session params opts]
    (let [opts (merge default-options opts)]
      (if-let [problem (callback-problem session params)]
-       (async/then nil (constantly {:error problem}))
+       (async/then {:error problem} identity)
        (async/then
         (exchange! (redemption-request session (param params "code")) opts)
         (fn [{:keys [error] :as response}]
@@ -728,8 +705,9 @@
             (if (:error answer)
               answer
               (async/then (confirm! session (:me answer) opts)
-                          (fn [{:keys [error] :as confirmed}]
-                            (if error confirmed answer)))))))))))
+                          #(if (:error %) % answer))))))))))
+
+;;; after signing in
 
 ;; IndieAuth 5.5.1; RFC 6749, section 6
 (defn refresh-request
@@ -742,9 +720,8 @@
   ([session refresh-token]
    (refresh-request session refresh-token {}))
   ([{:keys [token-endpoint client-id] :as session} refresh-token {:keys [scope] :as opts}]
-   (let [asked   (scopes (if (string? scope) scope (str/join " " scope)))
-         granted (set (scopes (:scope session)))]
-     (when-not (and asked (every? granted asked))
+   (let [asked (scopes scope)]
+     (when-not (and asked (every? (set (scopes (:scope session))) asked))
        (throw (ex-info "A refresh asks for the scopes of the session, or fewer"
                        {:scope scope :granted (:scope session)})))
      (form-request token-endpoint [["grant_type" "refresh_token"]
@@ -765,10 +742,7 @@
   ([session refresh-token opts]
    (let [opts (merge default-options opts)]
      (async/then (exchange! (refresh-request session refresh-token opts) opts)
-                 (fn [{:keys [error] :as response}]
-                   (if error
-                     response
-                     (redemption response opts)))))))
+                 #(if (:error %) % (redemption % opts))))))
 
 ;; IndieAuth 7; RFC 7009, section 2.1
 (defn revocation-request
@@ -791,18 +765,16 @@
   ([session token]
    (revoke! session token {}))
   ([{:keys [revocation-endpoint token-endpoint] :as session} token opts]
-   (let [opts (merge default-options opts)]
-     (if-not (or revocation-endpoint token-endpoint)
-       (async/then nil (constantly (failure ::no-revocation-endpoint
-                                            "The server has no endpoint to revoke a token")))
-       (async/then (exchange! (revocation-request session token) opts)
-                   (fn [{:keys [error status] :as response}]
-                     (cond
-                       error                  response
-                       (<= 200 status 299)    {:status status}
-                       :else                  (failure ::revocation-error
-                                                       (str "The server answered " status)
-                                                       {:status status}))))))))
+   (if-not (or revocation-endpoint token-endpoint)
+     (async/then (failure ::no-revocation-endpoint
+                          "The server has no endpoint to revoke a token")
+                 identity)
+     (async/then (exchange! (revocation-request session token) (merge default-options opts))
+                 (fn [{:keys [error status] :as response}]
+                   (cond
+                     error                  response
+                     (ring/success? status) {:status status}
+                     :else                  (server-error ::revocation-error status nil)))))))
 
 ;; IndieAuth 9; RFC 6750, section 2.1
 (defn userinfo!
@@ -818,32 +790,25 @@
   ([session access-token]
    (userinfo! session access-token {}))
   ([{:keys [userinfo-endpoint] :as session} access-token opts]
-   (let [opts (merge default-options opts)]
-     (if-not (url/web-url? userinfo-endpoint)
-       (async/then nil (constantly (failure ::no-userinfo-endpoint
-                                            "The server has no userinfo endpoint")))
-       (async/then
-        (exchange! {:url     userinfo-endpoint
-                    :headers {"Accept"        "application/json"
-                              "Authorization" (http/authorization {:token access-token})}}
-                   opts)
-        (fn [{:keys [error status body] :as response}]
-          (let [m (json/read-object body)]
-            (cond
-              error
-              response
+   (if-not (url/web-url? userinfo-endpoint)
+     (async/then (failure ::no-userinfo-endpoint "The server has no userinfo endpoint")
+                 identity)
+     (async/then
+      (exchange! {:url     userinfo-endpoint
+                  :headers {"Accept"        "application/json"
+                            "Authorization" (http/authorization {:token access-token})}}
+                 (merge default-options opts))
+      (fn [{:keys [error status body] :as response}]
+        (let [m (json/read-object body)]
+          (cond
+            error                        response
+            (not (ring/success? status)) (server-error ::userinfo-error status m)
+            (nil? m)                     (failure ::userinfo-error
+                                                  "The server's answer isn't a JSON object"
+                                                  {:status status})
+            :else                        m)))))))
 
-              (not (<= 200 status 299))
-              (failure ::userinfo-error (str "The server answered " status)
-                       (cond-> {:status status}
-                         (string? (:error m)) (assoc :code (:error m))))
-
-              (nil? m)
-              (failure ::userinfo-error "The server's answer isn't a JSON object"
-                       {:status status})
-
-              :else
-              m))))))))
+;;; client metadata
 
 ;; IndieAuth 4.2.1
 (defn client-metadata
@@ -865,8 +830,7 @@
     (when-not (client-id? client-id)
       (throw (ex-info "The :client-id isn't a valid client identifier"
                       {:client-id client-id})))
-    (when-not (and (url/web-url? page)
-                   (str/starts-with? client-id page))
+    (when-not (and (url/web-url? page) (str/starts-with? client-id page))
       (throw (ex-info "The :client-uri is a prefix of the :client-id"
                       {:client-id client-id :client-uri page})))
     (cond-> {:client_id  client-id
@@ -879,10 +843,9 @@
   "A Ring handler that serves the client metadata document of the `opts`
   of client-metadata as JSON, which a page in any browser can read."
   [opts]
-  (let [body (json/write-json (client-metadata opts))]
-    (ring/handler
-     (fn [{:keys [request-method] :as request}]
-       (case request-method
-         (:get :head) (ring/with-cors (ring/response 200 "application/json" body))
-         :options     (ring/with-cors (ring/text-response 204 ""))
-         (ring/not-allowed ["GET" "HEAD" "OPTIONS"]))))))
+  (let [document (constantly (ring/with-cors
+                              (ring/response 200 "application/json"
+                                             (json/write-json (client-metadata opts)))))]
+    (ring/handler {:get     document
+                   :head    document
+                   :options (constantly ring/preflight)})))

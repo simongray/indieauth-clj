@@ -1,13 +1,16 @@
 (ns dk.simongray.indieauth.server-test
   "The server: its metadata, the authorization request, consent and codes,
-  the token endpoint, the stores, client information, profile information
-  and the checks of a resource server. A case of indieauth.rocks's server
-  tests is named by its number, with clients of the test's own."
+  the token endpoint, refresh tokens, revocation, introspection and
+  userinfo, the stores, client information and profile information. A
+  case of indieauth.rocks's server tests is named by its number, with
+  clients of the test's own."
   (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
+            [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.json :as json]
+            [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.server :as server]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]
@@ -446,7 +449,7 @@
                   (fn [r]
                     (testing "S333: not a GET"
                       (is (= 405 (:status r)))
-                      (is (= "POST, OPTIONS" (get-in r [:headers "Allow"]))))))
+                      (is (= "OPTIONS, POST" (get-in r [:headers "Allow"]))))))
      #(async/then (token {:request-method :options})
                   (fn [r]
                     (testing "S334 and S906: a preflight, without credentials"
@@ -480,8 +483,8 @@
       (reset! clock #inst "2026-10-11T12:02:00Z")
       ((:put! store) "c" {:x 3})
       (is (nil? ((:get store) "a")))))
-  (testing "a store keeps the hash of a code or a token, not the text"
-    (is (= "LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564" (server/hash-key "foo")))))
+  (testing "a key is the SHA-256 of a code or a token, not the text"
+    (is (= "LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564" (bytes/hash-text "foo")))))
 
 (deftest client-information
   (let [opts {:send (t/network clients)}]
@@ -523,52 +526,6 @@
                             :photo "https://user.example/ann.jpg"
                             :email "ann@user.example"}
                            p)))))))
-
-(deftest resource-servers
-  (let [clock (atom noon)
-        opts  {:tokens (server/memory-store (atom {}) #(deref clock)) :now-fn #(deref clock)}
-        info  {:me "https://user.example/" :client-id "https://app.example/" :scope "create update"
-               :issued-at noon :expires #inst "2026-10-11T13:00:00Z"}]
-    ((:put! (:tokens opts)) (server/hash-key "the-token") (assoc info :type :access))
-    ((:put! (:tokens opts)) (server/hash-key "a-refresh-token") (assoc info :type :refresh))
-    (testing "RFC 6750: the token of a request"
-      (is (= "the-token" (server/bearer-token {:headers {"authorization" "Bearer the-token"}})))
-      (is (= "the-token" (server/bearer-token {:headers {"authorization" "bearer  the-token "}})))
-      (is (= "the-token" (server/bearer-token {:form-params {"access_token" "the-token"}})))
-      (is (nil? (server/bearer-token {:headers {"authorization" "Basic abc"}}))))
-    (testing "section 8.1"
-      (is (nil? (server/access-problem info ["create"])))
-      (is (nil? (server/access-problem info [])))
-      (is (= {:status 403 :code "insufficient_scope" :scope "delete"}
-             (dissoc (server/access-problem info ["delete"]) :reason)))
-      (is (= 401 (:status (server/access-problem nil ["create"])))))
-    (let [r (server/problem-response (server/access-problem info ["delete"]))]
-      (is (= "Bearer error=\"insufficient_scope\", scope=\"delete\"" (get-in r [:headers "WWW-Authenticate"])))
-      (is (= "insufficient_scope" (:error (answer r)))))
-    (run
-     #(async/then (server/access! {:headers {"authorization" "Bearer the-token"}} ["create"] opts)
-                  (fn [a]
-                    (testing "a token that grants the scope"
-                      (is (= info a)))))
-     #(async/then (server/access! {:headers {"authorization" "Bearer made-up"}} ["create"] opts)
-                  (fn [a]
-                    (testing "an unknown token"
-                      (is (= 401 (get-in a [:response :status])))
-                      (is (= "invalid_token" (get-in a [:error :code]))))))
-     #(async/then (server/access! {:headers {"authorization" "Bearer a-refresh-token"}} ["create"] opts)
-                  (fn [a]
-                    (testing "a refresh token is no access token"
-                      (is (= "invalid_token" (get-in a [:error :code]))))))
-     #(async/then (server/access! {:headers {}} ["create"] opts)
-                  (fn [a]
-                    (testing "no token, and an answer that says no more"
-                      (is (= 401 (get-in a [:response :status])))
-                      (is (= "Bearer" (get-in a [:response :headers "WWW-Authenticate"]))))))
-     #(do (reset! clock #inst "2026-10-11T13:00:00Z")
-          (async/then (server/token-info! "the-token" opts)
-                      (fn [i]
-                        (testing "an expired token"
-                          (is (nil? i)))))))))
 
 ;; phase 2: refresh tokens, revocation, introspection and userinfo
 
@@ -666,7 +623,7 @@
                   (fn [r]
                     (testing "S504: an old refresh token stops working"
                       (is (= "invalid_grant" (:error (answer r)))))))
-     #(async/then (server/token-info! (:access_token @newest) opts)
+     #(async/then (resource/token-info! (:access_token @newest) opts)
                   (fn [i]
                     (testing "S505: and using it revokes the grant, the newest tokens too"
                       (is (nil? i)))))
@@ -682,7 +639,7 @@
     (run
      (signed-in opts "create" #(reset! a %))
      #(do (swap! clock seconds-after 86400)
-          (async/then (server/token-info! (:access_token @a) opts)
+          (async/then (resource/token-info! (:access_token @a) opts)
                       (fn [i]
                         (testing "an access token lasts a day"
                           (is (nil? i))))))
@@ -721,7 +678,7 @@
                   (fn [r]
                     (testing "S302: a code works once"
                       (is (= "invalid_grant" (:error (answer r)))))))
-     #(async/then (server/token-info! (:access_token @first) opts)
+     #(async/then (resource/token-info! (:access_token @first) opts)
                   (fn [i]
                     (testing "S303: a code used again revokes the tokens it gave"
                       (is (nil? i)))))
@@ -760,7 +717,7 @@
                   (fn [r]
                     (testing "which stops working"
                       (is (= "invalid_grant" (:error (answer r)))))))
-     #(async/then (server/token-info! (:access_token @b) opts)
+     #(async/then (resource/token-info! (:access_token @b) opts)
                   (fn [i]
                     (testing "RFC 7009, section 2.1: and so do the access tokens of its grant"
                       (is (nil? i)))))
@@ -777,7 +734,7 @@
                   (fn [r]
                     (testing "section 7.1: action=revoke at the token endpoint, as earlier versions had it"
                       (is (= 200 (:status r))))))
-     #(async/then (server/token-info! (:access_token @a) opts)
+     #(async/then (resource/token-info! (:access_token @a) opts)
                   (fn [i]
                     (is (nil? i)))))))
 
@@ -819,7 +776,7 @@
                   (fn [r]
                     (testing "a refresh token isn't an active access token"
                       (is (= {:active false} (answer r))))))
-     #(async/then (server/access! (bearer (:access_token @a)) ["create"]
+     #(async/then (resource/access! (bearer (:access_token @a)) ["create"]
                                   (remote {"https://auth.example/introspect" h}))
                   (fn [info]
                     (testing "section 6: a resource server in another process"
@@ -829,7 +786,7 @@
                               :issued-at noon
                               :expires   (seconds-after noon 86400)}
                              info)))))
-     #(async/then (server/access! (bearer (:access_token @a)) ["create"] (remote {}))
+     #(async/then (resource/access! (bearer (:access_token @a)) ["create"] (remote {}))
                   (fn [a]
                     (testing "an introspection endpoint that fails"
                       (is (= 503 (get-in a [:response :status]))))))

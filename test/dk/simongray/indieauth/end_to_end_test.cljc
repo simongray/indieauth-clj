@@ -6,6 +6,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
+            [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.indieauth.server :as server]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
@@ -82,7 +83,7 @@
 
      "https://user.example/micropub"
      (fn [request]
-       (async/then (server/access! request ["create"] @opts)
+       (async/then (resource/access! request ["create"] @opts)
                    (fn [{:keys [error response me]}]
                      (if error
                        response

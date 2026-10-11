@@ -37,31 +37,17 @@
   where they differ."
   [a b]
   #?(:clj  (MessageDigest/isEqual ^bytes a ^bytes b)
-     :cljs (and (= (.-length a) (.-length b))
-                (let [diffs (map #(bit-xor (aget a %) (aget b %))
-                                 (range (.-length a)))]
-                  (zero? (reduce bit-or 0 diffs))))))
+     :cljs (and (= (alength a) (alength b))
+                (zero? (areduce a i acc 0
+                                (bit-or acc (bit-xor (aget a i) (aget b i))))))))
 
-;; FIPS 180-4
-(defn sha256
-  "The SHA-256 digest of the bytes `b`, as bytes."
-  [b]
-  #?(:clj  (.digest (MessageDigest/getInstance "SHA-256") ^bytes b)
-     :cljs (let [h (goog.crypt.Sha256.)]
-             (.update h (js/Array.from b))
-             (js/Uint8Array.from (.digest h)))))
-
-;; RFC 2104
-(defn hmac-sha256
-  "The HMAC-SHA256 of the bytes `message` with the bytes `key`, as bytes."
-  [key message]
-  #?(:clj  (.doFinal (doto (Mac/getInstance "HmacSHA256")
-                       (.init (SecretKeySpec. ^bytes key "HmacSHA256")))
-                     ^bytes message)
-     :cljs (let [mac (goog.crypt.Hmac. (goog.crypt.Sha256.)
-                                       (js/Array.from key)
-                                       64)]
-             (js/Uint8Array.from (.getHmac mac (js/Array.from message))))))
+(defn same-text?
+  "Whether `a` and `b` are the same text, in a time that doesn't tell where
+  they differ. Nil or another value is never the same."
+  [a b]
+  (and (string? a)
+       (string? b)
+       (same? (encode a) (encode b))))
 
 (defn random
   "`n` random bytes from the platform's secure source."
@@ -88,3 +74,28 @@
          :cljs (base64/decodeStringToUint8Array s))
       (catch #?(:clj Exception :cljs :default) _
         nil))))
+
+;; FIPS 180-4
+(defn sha256
+  "The SHA-256 digest of the bytes `b`, as bytes."
+  [b]
+  #?(:clj  (.digest (MessageDigest/getInstance "SHA-256") ^bytes b)
+     :cljs (let [h (goog.crypt.Sha256.)]
+             (.update h b)
+             (js/Uint8Array.from (.digest h)))))
+
+(defn hash-text
+  "The SHA-256 of the text `s` in the URL-safe letters of base64, e.g. a
+  PKCE code challenge, or the key under which a store keeps a token."
+  [s]
+  (base64url (sha256 (encode s))))
+
+;; RFC 2104
+(defn hmac-sha256
+  "The HMAC-SHA256 of the bytes `message` with the bytes `key`, as bytes."
+  [key message]
+  #?(:clj  (.doFinal (doto (Mac/getInstance "HmacSHA256")
+                       (.init (SecretKeySpec. ^bytes key "HmacSHA256")))
+                     ^bytes message)
+     :cljs (let [mac (goog.crypt.Hmac. (goog.crypt.Sha256.) (js/Array.from key) 64)]
+             (js/Uint8Array.from (.getHmac mac message)))))

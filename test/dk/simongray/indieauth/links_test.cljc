@@ -11,12 +11,12 @@
   ([url link s]
    (urls url link s {}))
   ([url link s opts]
-   (links/rel-urls "indieauth-metadata"
-                   {:url url :headers (if link {"link" link} {})}
-                   (html/parse s)
-                   opts)))
+   (links/hrefs "indieauth-metadata"
+                (links/links {:url url :headers (if link {"link" link} {})}
+                             (html/parse s)
+                             opts))))
 
-(deftest rel-urls
+(deftest hrefs
   (testing "the Link headers first, then the link elements, each in order"
     (is (= ["https://a.example/1" "https://b.example/2" "https://a.example/3"]
            (urls "https://a.example/p"

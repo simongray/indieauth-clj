@@ -75,6 +75,11 @@
           {}
           pairs))
 
+(defn success?
+  "Whether the `status` of a response is that of a success."
+  [status]
+  (and (int? status) (<= 200 status 299)))
+
 (defn header
   "The value of the header `header-name` of the Ring `request`, whose
   header names are in lower case."
@@ -110,34 +115,48 @@
           :headers merge {"Cache-Control" "no-store"
                           "Pragma"        "no-cache"}))
 
-;; RFC 9110, section 15.5.6
-(defn not-allowed
-  "The Ring response to a request whose method isn't one of `methods`."
-  [methods]
-  (assoc-in (text-response 405 "") [:headers "Allow"] (str/join ", " methods)))
-
 (defn with-cors
-  "The Ring `response` with cors-headers."
-  [response]
-  (update response :headers merge cors-headers))
+  "The Ring `response` with cors-headers, unless `cors?` is false."
+  ([response]
+   (with-cors response true))
+  ([response cors?]
+   (cond-> response
+     cors? (update :headers merge cors-headers))))
+
+(def preflight
+  "The Ring response to the preflight request of a page in a browser."
+  (with-cors (text-response 204 "")))
+
+;; RFC 9110, section 15.5.6
+(defn- by-method
+  "A function of a Ring request that answers it by the function of its
+  method in `fns`, or with 405 and the methods of `fns`."
+  [fns]
+  (let [allow (->> (keys fns) (map (comp str/upper-case name)) sort (str/join ", "))]
+    (fn [{:keys [request-method] :as request}]
+      (if-let [f (get fns request-method)]
+        (f request)
+        (assoc-in (text-response 405 "") [:headers "Allow"] allow)))))
 
 (defn handler
-  "A Ring handler that answers by the function `f` of a request, which gives
-  a response or a promise of one, and that takes the arguments of a
-  synchronous and of an asynchronous handler."
-  [f]
-  (fn
-    ([request]
-     (f request))
-    ([request respond raise]
-     #?(:clj  (let [{:keys [answer error]} (try
-                                             {:answer (async/then (f request) identity)}
-                                             (catch Throwable e
-                                               {:error e}))]
-                (if error
-                  (raise error)
-                  (respond answer)))
-        :cljs (-> (js/Promise.resolve nil)
-                  (.then (fn [_] (f request)))
-                  (.then respond)
-                  (.catch raise))))))
+  "A Ring handler that answers a request by the function of its method in
+  `fns`, a map of request methods to functions of a request, which give a
+  response or a promise of one. Another method gets 405. It takes the
+  arguments of a synchronous and of an asynchronous handler."
+  [fns]
+  (let [f (by-method fns)]
+    (fn
+      ([request]
+       (f request))
+      ([request respond raise]
+       #?(:clj  (let [{:keys [answer error]} (try
+                                               {:answer (async/then (f request) identity)}
+                                               (catch Throwable e
+                                                 {:error e}))]
+                  (if error
+                    (raise error)
+                    (respond answer)))
+          :cljs (-> (js/Promise.resolve nil)
+                    (.then (fn [_] (f request)))
+                    (.then respond)
+                    (.catch raise)))))))

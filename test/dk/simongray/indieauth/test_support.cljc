@@ -31,8 +31,7 @@
 (defn ring-request
   "The Ring request of the wary-fetch `request` map."
   [{:keys [method url headers body]}]
-  (let [{:keys [scheme authority path query]} (indieauth/url-parts url)
-        {:keys [host port]}                     (indieauth/authority-parts authority)]
+  (let [{:keys [scheme host port path query]} (indieauth/url-parts url)]
     {:request-method (or method :get)
      :scheme         (keyword scheme)
      :server-name    host
