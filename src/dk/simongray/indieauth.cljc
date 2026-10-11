@@ -389,12 +389,17 @@
                         (failure ::invalid-metadata problem {:url metadata-url})
 
                         :else
-                        (merge base
-                               {:metadata-url           metadata-url
-                                :metadata               metadata
-                                :issuer                 (:issuer metadata)
-                                :authorization-endpoint (:authorization_endpoint metadata)
-                                :token-endpoint         (:token_endpoint metadata)})))))
+                        (cond-> (merge base
+                                       {:metadata-url           metadata-url
+                                        :metadata               metadata
+                                        :issuer                 (:issuer metadata)
+                                        :authorization-endpoint (:authorization_endpoint metadata)
+                                        :token-endpoint         (:token_endpoint metadata)})
+                          (url/web-url? (:revocation_endpoint metadata))
+                          (assoc :revocation-endpoint (:revocation_endpoint metadata))
+
+                          (url/web-url? (:userinfo_endpoint metadata))
+                          (assoc :userinfo-endpoint (:userinfo_endpoint metadata)))))))
 
       (url/web-url? authorization-endpoint)
       (merge base found)
@@ -413,7 +418,9 @@
     redirected, and the last
   - :metadata-url, and :metadata, the server's JSON, unless the page has
     only the older links
-  - :issuer, :authorization-endpoint and :token-endpoint
+  - :issuer, :authorization-endpoint and :token-endpoint, and the
+    :revocation-endpoint and :userinfo-endpoint when the metadata names
+    them
 
   A failure gives a map of the :error, with its :type and :reason. The
   `opts` are those of default-options and http/fetch!. In ClojureScript,
@@ -524,7 +531,9 @@
                {:url authorization-endpoint})
       (let [session  (merge (select-keys discovery [:me :urls :issuer
                                                     :authorization-endpoint
-                                                    :token-endpoint])
+                                                    :token-endpoint
+                                                    :revocation-endpoint
+                                                    :userinfo-endpoint])
                             {:client-id    client-id
                              :redirect-uri redirect-uri
                              :scope        (scope-text scopes)})
@@ -597,6 +606,17 @@
     :token
     :authorization))
 
+(defn- form-request
+  "The request map that posts the form of `fields`, pairs of a name and a
+  value, to `url` for a JSON answer. The body is a hidden text of
+  wary-fetch, since it holds a code or a token."
+  [url fields]
+  {:method  :post
+   :url     url
+   :headers {"Content-Type" "application/x-www-form-urlencoded"
+             "Accept"       "application/json"}
+   :body    (secret/hide (url/query-string fields))})
+
 ;; IndieAuth 5.3.1
 (defn redemption-request
   "The request map that redeems the `code` for the `session`: at the token
@@ -604,17 +624,14 @@
   at the authorization endpoint for the profile URL alone. The body is a
   hidden text of wary-fetch, since it holds the code and the verifier."
   [{:keys [client-id redirect-uri code-verifier] :as session} code]
-  {:method  :post
-   :url     (if (= :token (redeem-at session))
-              (:token-endpoint session)
-              (:authorization-endpoint session))
-   :headers {"Content-Type" "application/x-www-form-urlencoded"
-             "Accept"       "application/json"}
-   :body    (secret/hide (url/query-string [["grant_type" "authorization_code"]
-                                            ["code" code]
-                                            ["client_id" client-id]
-                                            ["redirect_uri" redirect-uri]
-                                            ["code_verifier" code-verifier]]))})
+  (form-request (if (= :token (redeem-at session))
+                  (:token-endpoint session)
+                  (:authorization-endpoint session))
+                [["grant_type" "authorization_code"]
+                 ["code" code]
+                 ["client_id" client-id]
+                 ["redirect_uri" redirect-uri]
+                 ["code_verifier" code-verifier]]))
 
 ;; IndieAuth 5.3.2 and 5.3.3; RFC 6749, section 5.2
 (defn redemption
@@ -713,6 +730,120 @@
               (async/then (confirm! session (:me answer) opts)
                           (fn [{:keys [error] :as confirmed}]
                             (if error confirmed answer)))))))))))
+
+;; IndieAuth 5.5.1; RFC 6749, section 6
+(defn refresh-request
+  "The request map that exchanges the `refresh-token` for a new access
+  token at the token endpoint of the `session`, for the :scope of `opts`,
+  the scopes of the session by default.
+
+  A scope that the session didn't ask for throws, since a refresh asks for
+  the same scopes or fewer."
+  ([session refresh-token]
+   (refresh-request session refresh-token {}))
+  ([{:keys [token-endpoint client-id] :as session} refresh-token {:keys [scope] :as opts}]
+   (let [asked   (scopes (if (string? scope) scope (str/join " " scope)))
+         granted (set (scopes (:scope session)))]
+     (when-not (and asked (every? granted asked))
+       (throw (ex-info "A refresh asks for the scopes of the session, or fewer"
+                       {:scope scope :granted (:scope session)})))
+     (form-request token-endpoint [["grant_type" "refresh_token"]
+                                   ["refresh_token" refresh-token]
+                                   ["client_id" client-id]
+                                   ["scope" (scope-text asked)]]))))
+
+(defn refresh!
+  "Exchange the `refresh-token` for a new access token at the token
+  endpoint of the `session`, with `opts`, and give the answer as redeem!
+  does. In ClojureScript, it gives a promise.
+
+  The answer has a new :refresh_token when the server gives one, which
+  replaces the old one, as section 5.5.1 says. The `opts` are those of
+  refresh-request and default-options."
+  ([session refresh-token]
+   (refresh! session refresh-token {}))
+  ([session refresh-token opts]
+   (let [opts (merge default-options opts)]
+     (async/then (exchange! (refresh-request session refresh-token opts) opts)
+                 (fn [{:keys [error] :as response}]
+                   (if error
+                     response
+                     (redemption response opts)))))))
+
+;; IndieAuth 7; RFC 7009, section 2.1
+(defn revocation-request
+  "The request map that revokes the `token`, an access token or a refresh
+  token, at the revocation endpoint of the `session`. Without one, it goes
+  to the token endpoint with action=revoke, as earlier versions of
+  IndieAuth had it."
+  [{:keys [revocation-endpoint token-endpoint] :as session} token]
+  (form-request (or revocation-endpoint token-endpoint)
+                (cond-> [["token" token]]
+                  (nil? revocation-endpoint) (conj ["action" "revoke"]))))
+
+(defn revoke!
+  "Revoke the `token`, an access token or a refresh token, at the server of
+  the `session`, with `opts`, e.g. when the user signs out, and give a map
+  of the :status, or of the :error. In ClojureScript, it gives a promise.
+
+  A server revokes a refresh token with the access tokens of its grant.
+  The `opts` are those of default-options."
+  ([session token]
+   (revoke! session token {}))
+  ([{:keys [revocation-endpoint token-endpoint] :as session} token opts]
+   (let [opts (merge default-options opts)]
+     (if-not (or revocation-endpoint token-endpoint)
+       (async/then nil (constantly (failure ::no-revocation-endpoint
+                                            "The server has no endpoint to revoke a token")))
+       (async/then (exchange! (revocation-request session token) opts)
+                   (fn [{:keys [error status] :as response}]
+                     (cond
+                       error                  response
+                       (<= 200 status 299)    {:status status}
+                       :else                  (failure ::revocation-error
+                                                       (str "The server answered " status)
+                                                       {:status status}))))))))
+
+;; IndieAuth 9; RFC 6750, section 2.1
+(defn userinfo!
+  "Fetch the user's profile information from the userinfo endpoint of the
+  `session` with the `access-token`, which needs the profile scope, with
+  `opts`, and give the map of its JSON, or of the :error. In ClojureScript,
+  it gives a promise.
+
+  The token goes in the Authorization header, never in the URL. Like the
+  profile of redeem!, the information is what the user chose to share,
+  and never says who the user is. The `opts` are those of
+  default-options."
+  ([session access-token]
+   (userinfo! session access-token {}))
+  ([{:keys [userinfo-endpoint] :as session} access-token opts]
+   (let [opts (merge default-options opts)]
+     (if-not (url/web-url? userinfo-endpoint)
+       (async/then nil (constantly (failure ::no-userinfo-endpoint
+                                            "The server has no userinfo endpoint")))
+       (async/then
+        (exchange! {:url     userinfo-endpoint
+                    :headers {"Accept"        "application/json"
+                              "Authorization" (http/authorization {:token access-token})}}
+                   opts)
+        (fn [{:keys [error status body] :as response}]
+          (let [m (json/read-object body)]
+            (cond
+              error
+              response
+
+              (not (<= 200 status 299))
+              (failure ::userinfo-error (str "The server answered " status)
+                       (cond-> {:status status}
+                         (string? (:error m)) (assoc :code (:error m))))
+
+              (nil? m)
+              (failure ::userinfo-error "The server's answer isn't a JSON object"
+                       {:status status})
+
+              :else
+              m))))))))
 
 ;; IndieAuth 4.2.1
 (defn client-metadata

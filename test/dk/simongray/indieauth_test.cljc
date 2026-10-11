@@ -8,7 +8,8 @@
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
-            [dk.simongray.wary-fetch.async :as async]))
+            [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.secret :as secret]))
 
 (deftest profile-urls
   (testing "section 3.2, the valid examples"
@@ -474,3 +475,83 @@
     (is (= "application/json" (get-in r [:headers "Content-Type"])))
     (is (= {:client_id "https://app.example/" :client_uri "https://app.example/"} (json/read-object (:body r))))
     (is (= 405 (:status (handler {:request-method :post :uri "/"}))))))
+
+;; phase 2: refresh, revocation and userinfo
+
+(defn- recorder
+  "A Ring handler that answers each request with `status` and the JSON of
+  `x`, and conj's the request to the atom `requests`."
+  [requests status x]
+  (fn [request]
+    (swap! requests conj request)
+    ((t/json-doc status x) nil)))
+
+(defn- form
+  "The fields of the form that the Ring `request` posted, by name."
+  [request]
+  (t/query (str "?" (:body request))))
+
+(deftest refreshing
+  (let [requests (atom [])
+        opts     {:send (t/network {"https://tokens.example/token"
+                                    (recorder requests 200 (assoc answer :refresh_token "new"))})}]
+    (testing "C502: grant_type=refresh_token with the client_id"
+      (is (= {"grant_type" "refresh_token" "refresh_token" "old" "client_id" "https://app.example/"}
+             (form {:body (secret/reveal (:body (indieauth/refresh-request session "old")))})))
+      (is (= "create" (get (form {:body (secret/reveal (:body (indieauth/refresh-request session "old" {:scope ["create"]})))})
+                           "scope"))
+          "or fewer scopes"))
+    (testing "C504: never more scopes"
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (indieauth/refresh-request session "old" {:scope "create delete"}))))
+    (run
+     #(async/then (indieauth/refresh! session "old" opts)
+                  (fn [a]
+                    (testing "C503: a new refresh token, to replace the old"
+                      (is (= (assoc answer :refresh_token "new") a))
+                      (is (= ["https://tokens.example/token"] (map :url @requests)))))))))
+
+(deftest revoking
+  (let [requests (atom [])
+        routes   {"https://auth.example/revoke" (recorder requests 200 {})
+                  "https://tokens.example/token" (recorder requests 200 {})}
+        opts     {:send (t/network routes)}]
+    (run
+     #(async/then (indieauth/revoke! (assoc session :revocation-endpoint "https://auth.example/revoke") "a-token" opts)
+                  (fn [a]
+                    (testing "C505: at the revocation endpoint"
+                      (is (= {:status 200} a))
+                      (is (= {"token" "a-token"} (form (peek @requests)))))))
+     #(async/then (indieauth/revoke! session "a-token" opts)
+                  (fn [_]
+                    (testing "section 7.1: at the token endpoint with action=revoke, without one"
+                      (is (= "https://tokens.example/token" (:url (peek @requests))))
+                      (is (= {"token" "a-token" "action" "revoke"} (form (peek @requests)))))))
+     #(async/then (indieauth/revoke! (dissoc session :token-endpoint) "a-token" opts)
+                  (fn [a]
+                    (testing "a server without either"
+                      (is (= ::indieauth/no-revocation-endpoint (-> a :error :type)))))))))
+
+(deftest userinfo
+  (let [requests (atom [])
+        profile  {:name "A user" :url "https://user.example/"}
+        session  (assoc session :userinfo-endpoint "https://auth.example/userinfo")
+        opts     (fn [status x]
+                   {:send (t/network {"https://auth.example/userinfo" (recorder requests status x)})})]
+    (run
+     #(async/then (indieauth/userinfo! session "a-token" (opts 200 profile))
+                  (fn [a]
+                    (testing "the profile information"
+                      (is (= profile a)))
+                    (testing "C501: the token in the Authorization header, not in the URL"
+                      (is (= "Bearer a-token" (get-in (peek @requests) [:headers "authorization"])))
+                      (is (= "https://auth.example/userinfo" (:url (peek @requests)))))))
+     #(async/then (indieauth/userinfo! session "a-token" (opts 401 {:error "invalid_token"}))
+                  (fn [a]
+                    (testing "a token that the server refuses"
+                      (is (= {:type ::indieauth/userinfo-error :status 401 :code "invalid_token"}
+                             (dissoc (:error a) :reason))))))
+     #(async/then (indieauth/userinfo! (dissoc session :userinfo-endpoint) "a-token" (opts 200 profile))
+                  (fn [a]
+                    (testing "a server without a userinfo endpoint"
+                      (is (= ::indieauth/no-userinfo-endpoint (-> a :error :type)))))))))
