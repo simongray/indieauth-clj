@@ -2,8 +2,7 @@
   "The links of a response by their relation types, from its Link headers
   and the head of its page."
   (:require [clojure.test :refer [deftest is testing]]
-            [dk.simongray.html-pieces :as html]
-            [dk.simongray.indieauth.links :as links]))
+            [dk.simongray.indieauth.fetch :as fetch]))
 
 (defn- urls
   "The URLs of `rel` in a response from `url` with the `link` header and
@@ -11,9 +10,9 @@
   ([url link s]
    (urls url link s {}))
   ([url link s opts]
-   (links/hrefs "indieauth-metadata"
-                (links/links {:url url :headers (if link {"link" link} {})}
-                             (html/parse s)
+   (fetch/hrefs "indieauth-metadata"
+                (fetch/links {:url url :headers (if link {"link" link} {})}
+                             s
                              opts))))
 
 (deftest hrefs

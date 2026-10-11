@@ -16,7 +16,6 @@
             [dk.simongray.indieauth.fetch :as fetch]
             [dk.simongray.indieauth.identifier :as identifier]
             [dk.simongray.indieauth.instant :as instant]
-            [dk.simongray.indieauth.links :as links]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.indieauth.state :as state]
             [dk.simongray.wary-fetch :as http]
@@ -223,8 +222,8 @@
   ([response]
    (endpoints response {}))
   ([response opts]
-   (let [all       (links/links response (fetch/page-nodes response) opts)
-         first-url #(first (links/hrefs % all))]
+   (let [all       (fetch/links response (fetch/page-html response) opts)
+         first-url #(first (fetch/hrefs % all))]
      (if-let [metadata-url (first-url "indieauth-metadata")]
        {:metadata-url metadata-url}
        ;; the links of earlier versions of IndieAuth

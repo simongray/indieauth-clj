@@ -5,7 +5,7 @@
   (:require [clojure.string :as str]
             [dk.simongray.html-pieces :as html]
             [dk.simongray.indieauth :as indieauth]
-            [dk.simongray.indieauth.links :as links]
+            [dk.simongray.indieauth.fetch :as fetch]
             [dk.simongray.microformats :as mf]
             [dk.simongray.wary-fetch.url :as url]))
 
@@ -26,7 +26,7 @@
                                  apps))
                   (first apps))]
     (cond-> (assoc (unknown-client client-id)
-                   :redirect-uris (vec (links/hrefs "redirect_uri" (links/links response nodes {}))))
+                   :redirect-uris (vec (fetch/hrefs "redirect_uri" (fetch/links response nodes {}))))
       (mf/property app :name) (assoc :client-name (mf/property app :name))
       (mf/property app :url)  (assoc :client-uri (mf/property app :url))
       (mf/property app :logo) (assoc :logo-uri (mf/property app :logo)))))

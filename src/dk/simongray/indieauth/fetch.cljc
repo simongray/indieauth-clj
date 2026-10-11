@@ -1,9 +1,10 @@
 (ns ^:no-doc dk.simongray.indieauth.fetch
   "The requests that a client sends and the answers it reads: pages and
-  JSON documents that it gets, forms that it posts, and what goes wrong,
-  as maps of the :error. The types of the errors are keywords of
-  dk.simongray.indieauth, whose functions give them."
-  (:require [dk.simongray.html-pieces :as html]
+  JSON documents that it gets, the links they name, forms that it posts,
+  and what goes wrong, as maps of the :error. The types of the errors are
+  keywords of dk.simongray.indieauth, whose functions give them."
+  (:require [clojure.string :as str]
+            [dk.simongray.html-pieces :as html]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
@@ -80,11 +81,47 @@
     (when (map? x)
       x)))
 
-(defn page-nodes
-  "The Hiccup of the HTML page in the `response`, or nil when it holds
-  another kind of document."
+(defn page-html
+  "The HTML of the page in the `response`, or nil when it holds another
+  kind of document."
   [{:keys [headers body] :as response}]
   (let [type (headers/media-type (headers/header headers "content-type"))]
     (when (and (string? body)
                (contains? #{nil "text/html" "application/xhtml+xml"} type))
-      (html/parse body))))
+      body)))
+
+;; RFC 8288, section 3.3; HTML Standard, section 4.6.1: link types
+;; separated by whitespace, in any case
+(defn- link
+  "The link of `rel`, a text of link types, to `href`, as a map of its
+  :rels, a set of link types in lower case, and its :href, or nil without
+  an href."
+  [rel href]
+  (when href
+    {:rels (set (str/split (str/lower-case (str rel)) #"\s+"))
+     :href href}))
+
+;; IndieAuth 4.1 and 4.2.2; RFC 8288, section 3
+(defn links
+  "The links of the `response` and of its `page`, its HTML or Hiccup, by
+  `opts`, as maps of :rels and an absolute :href: those of its Link
+  headers first, and then those of the page's link elements.
+
+  Those are in its head, or in all of it by :body-links?. The head alone
+  is read, base element and all, since anyone who writes in the body
+  could add a base element or a link there."
+  [{:keys [url headers] :as response} page {:keys [body-links?] :as opts}]
+  (concat
+   (keep (fn [{:keys [rel href]}] (link rel (url/absolute-url url href)))
+         (headers/links headers))
+   (when page
+     (keep (fn [[_ {:keys [rel href]}]] (link rel href))
+           (html/links (if body-links? page (html/head page))
+                       {:base-url url :link-tags #{:link}})))))
+
+(defn hrefs
+  "The hrefs of the `links` with the link type `rel`, in their order, each
+  where it first appears."
+  [rel links]
+  (let [rel (str/lower-case rel)]
+    (distinct (keep #(when (contains? (:rels %) rel) (:href %)) links))))
