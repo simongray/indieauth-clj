@@ -163,11 +163,9 @@
   it, and the Ring :response to answer with. In ClojureScript, it gives a
   promise.
 
-  A resource server in the same process as the server, e.g. a Micropub
-  endpoint, gives the server's :tokens store in `opts`. One in another
-  process gives the :introspection-endpoint and the :resource-token of
-  introspect! instead, and a token that can't be checked gives the status
-  503. Whether the token's :me may use the resource is yours to say."
+  In the server's own process, give its :tokens store in `opts`, and else
+  the :introspection-endpoint and :resource-token of introspect!. Whether
+  the token's :me may use the resource is up to you."
   [request scopes {:keys [tokens] :as opts}]
   (if-let [token (bearer-token request)]
     (async/then (if tokens

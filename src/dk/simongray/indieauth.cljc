@@ -1,19 +1,14 @@
 (ns dk.simongray.indieauth
   "IndieAuth for clients: the identifiers of users, clients and servers,
-  the discovery of a user's server, and signing in with it, with an access
-  token or without.
+  the discovery of a user's server, and signing in with it.
 
   The code follows the IndieAuth Living Standard of 11 July 2024 at
   https://indieauth.spec.indieweb.org/ and cites its sections. The server
   is in dk.simongray.indieauth.server, the checks of a resource server in
   dk.simongray.indieauth.resource, and the signed maps that carry a value
-  through a browser in dk.simongray.indieauth.signed.
-
-  The other namespaces under dk.simongray.indieauth hold what these four
-  are made of: identifier the parts of URLs, fetch the requests of a
-  client, state the state of a sign-in, links the links of a page, ring
-  the Ring requests and answers, and bytes, json and instant the values
-  of both platforms."
+  through a browser in dk.simongray.indieauth.signed. The other
+  namespaces are internal and named for what they hold, e.g. identifier
+  for the parts of URLs and grant for the codes and tokens of a server."
   (:require [clojure.string :as str]
             [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.fetch :as fetch]
@@ -193,17 +188,13 @@
   "The default of each option of a client that has one, which follows
   IndieAuth:
 
-  - :profile-url-pred, profile-url?, the URLs that a user can sign in as,
-    as section 3.2 has them
-  - :body-links?, false: a page names its server in its head, since anyone
-    who writes in its body could name another
-  - :session-seconds, 600: how long a user has to sign in at the server,
-    and how long a signed state lasts
-  - :timeout-seconds, 10: the limit of each request
-  - :max-redirects, 5: how many redirects discovery follows, the limit
-    that section 4.1 asks a client to set
-  - :max-page-bytes, 2 MB: the largest page of a profile URL
-  - :max-json-bytes, 256 kB: the largest JSON document of a server
+  - :profile-url-pred, profile-url?, the URLs that a user can sign in as
+  - :body-links?, false: only the head of a page names its server, since
+    anyone who writes in its body could name another
+  - :session-seconds, how long a user has to sign in at the server
+  - :max-redirects, how many redirects discovery follows
+  - :timeout-seconds, :max-page-bytes and :max-json-bytes, the limits of
+    each request
   - :send, http/send-public!, which sends to the public internet alone
   - :now-fn, a function that gives the instant now"
   {:profile-url-pred profile-url?
@@ -303,13 +294,10 @@
   that it names, with `opts`, and give the server as a map:
 
   - :me, the URL in canonical form
-  - :urls, the URLs that discovery went through: :me, those that
-    redirected, and the last
-  - :metadata-url, and :metadata, the server's JSON, unless the page has
-    only the older links
-  - :issuer, :authorization-endpoint and :token-endpoint, and the
-    :revocation-endpoint and :userinfo-endpoint when the metadata names
-    them
+  - :urls, the URLs that discovery went through, from :me to the last
+    redirect
+  - :metadata-url and :metadata, unless the page has only older links
+  - :issuer and the endpoints that the server has
 
   A failure gives a map of the :error, with its :type and :reason. The
   `opts` are those of default-options and http/fetch!. In ClojureScript,
@@ -356,18 +344,15 @@
   - :redirect-uri, the URL that the browser comes back to
   - :scope, the scopes to ask for, as a text or a collection. Without one,
     the answer has the user's profile URL alone.
-  - :secret, a text of 32 bytes or more, e.g. a token, to sign the session
-    into the state, so that state-session gets it back from the state
-  - :data, any EDN that the session carries for you, e.g. the request of
-    an IndieAuth server that the user signs in for
+  - :secret, a text of 32 bytes or more, e.g. a token, that signs the
+    session into the state for state-session
+  - :data, any EDN that the session carries for you
   - :now-fn, as default-options has it
 
-  Keep the session where the browser's next request finds it, e.g. in a
-  session store, since it holds the PKCE code verifier and the state that
-  ties the answer to this browser. With a :secret, keep its :nonce in a
-  cookie instead, and give it to state-session with the state. A scope
-  that asks for an access token needs a token endpoint, and a server
-  without one gives a map of the :error."
+  Keep the session for the browser's return, e.g. in a session store, or
+  with a :secret, only its :nonce in a cookie. A scope that asks for an
+  access token needs a token endpoint, and a server without one gives a
+  map of the :error."
   [{:keys [me authorization-endpoint token-endpoint] :as discovery}
    {:keys [client-id redirect-uri scope secret data] :as opts}]
   (let [{:keys [now-fn]} (merge default-options opts)
@@ -421,12 +406,9 @@
   "What's wrong with the query `params` that the browser came back with,
   for the `session`, as a map of the :type and the :reason, or nil.
 
-  The params are a map by name, with texts or keywords as keys. The state
-  must be the session's, and iss must be the issuer of the server, the
-  same text, unless the server has the older links alone and so no
-  issuer. An answer of the server with an error, e.g. access_denied when
-  the user said no, is a problem of the type ::authorization-error, with
-  the :code that the server gave."
+  The params are a map with texts or keywords as keys. An error from the
+  server, e.g. access_denied when the user said no, is a problem of the
+  type ::authorization-error, with the server's :code."
   [{:keys [state issuer] :as session} params]
   (let [error (ring/param params "error")]
     (cond
@@ -529,10 +511,10 @@
   form. In ClojureScript, it gives a promise.
 
   It checks the params with callback-problem, redeems the code with
-  redemption-request, and confirms the :me with confirm!. A failure at
-  any of them gives a map of the :error, with its :type and its :reason.
-  The profile, if any, is what the user chose to share, so it never says
-  who the user is: the :me does. The `opts` are those of default-options."
+  redemption-request, and confirms the :me with confirm!. A failure gives
+  a map of the :error, with its :type and :reason. Only the :me says who
+  the user is, never the :profile. The `opts` are those of
+  default-options."
   ([session params]
    (redeem! session params {}))
   ([session params opts]
@@ -625,10 +607,8 @@
   `opts`, and give the map of its JSON, or of the :error. In ClojureScript,
   it gives a promise.
 
-  The token goes in the Authorization header, never in the URL. Like the
-  profile of redeem!, the information is what the user chose to share,
-  and never says who the user is. The `opts` are those of
-  default-options."
+  Like the :profile of redeem!, it never says who the user is. The `opts`
+  are those of default-options."
   ([session access-token]
    (userinfo! session access-token {}))
   ([{:keys [userinfo-endpoint] :as session} access-token opts]
@@ -659,14 +639,11 @@
 
   - :client-id, the client identifier
   - :client-name, the name of the client to show the user
-  - :client-uri, a page about the client, the client identifier by default
+  - :client-uri, a page about the client, which is a prefix of the client
+    identifier, and the client identifier by default
   - :logo-uri, the URL of its logo
-  - :redirect-uris, the URLs that the browser may come back to, which a
-    redirect URL on another host than the client identifier's must be
-    among
-
-  The page about the client is a prefix of the client identifier, as the
-  spec says."
+  - :redirect-uris, the redirect URLs, which must list any on another
+    host than the client identifier's"
   [{:keys [client-id client-name client-uri logo-uri redirect-uris] :as opts}]
   (let [page (or client-uri client-id)]
     (when-not (client-id? client-id)

@@ -2,23 +2,13 @@
   "An IndieAuth server: the authorization, token, revocation,
   introspection and userinfo endpoints and the metadata document.
 
-  Signing the user in and asking for their consent are yours to do. The
-  authorization endpoint checks a client's request and gives it to a
-  function of yours, which signs the user in by any means and shows the
-  consent page with what consent gives. Then approve! checks the answer
-  and gives the client its code. Codes and tokens are kept in stores of
-  yours, maps of a few functions, or in memory-store, and only their
-  hashes are kept. In ClojureScript, the handlers answer with promises,
-  and a server gives them a body that it has read.
+  Signing the user in and asking for consent are up to you: the
+  :authorize function of handler gets the checked request, and approve!
+  gives the client its code when the user says yes. Codes and tokens go in
+  stores of yours, or in memory-store, as hashes. In ClojureScript, the
+  handlers answer with promises, and take a body that has been read.
 
-  The code follows the IndieAuth Living Standard of 11 July 2024 at
-  https://indieauth.spec.indieweb.org/ and cites its sections. A resource
-  server checks the tokens with dk.simongray.indieauth.resource.
-
-  What the server is made of is in the namespaces beside it: info for the
-  information of clients and users, authorization for the checks of a
-  request, grant for codes, grants and tokens, and endpoint for the
-  answers to the forms that the endpoints take."
+  Its internals are in info, authorization, grant and endpoint."
   (:require [clojure.string :as str]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.authorization :as authorization]
@@ -42,38 +32,29 @@
   "The default of each option of a server that has one, which follows
   IndieAuth:
 
-  - :scopes-supported, the scopes that the metadata lists, profile and
-    email. Add those of your resource servers, e.g. create for Micropub.
-  - :code-seconds, 60: how long a code lasts, well within the 10 minutes
-    that section 5.2.1 recommends at most
-  - :token-seconds, 86400: how long an access token lasts, a day, or for
-    ever when nil. Section 5.5 recommends short-lived tokens with refresh
-    tokens.
-  - :refresh-seconds, 2592000: how long a refresh token lasts unused, 30
-    days, since section 5.5 says that one should expire when a client
-    has been inactive. Nil gives no refresh tokens.
+  - :scopes-supported, the scopes that the metadata lists. Add those of
+    your resource servers, e.g. create for Micropub.
+  - :code-seconds, :token-seconds and :refresh-seconds, how long a code,
+    an access token and an unused refresh token last. A nil
+    :token-seconds gives tokens that never expire, and a nil
+    :refresh-seconds no refresh tokens.
+  - :request-seconds, how long a user has to sign in and say yes
   - :legacy-revocation?, true: the token endpoint revokes a token with
     action=revoke, as earlier versions of IndieAuth had it
   - :legacy-verification?, false: the token endpoint verifies a token
-    with a GET, as the W3C Note of 2018 had it, for older resource
-    servers. It tells anyone who has a token whose it is, which is why
-    introspection replaced it, so turn it on only for one that needs it.
-  - :request-seconds, 1800: how long a user has to sign in and say yes
+    with a GET, as the W3C Note of 2018 had it. It tells anyone who has a
+    token whose it is, so turn it on only for a resource server that
+    needs it.
   - :client-info?, true: the client identifier is fetched for the
-    client's name, logo and redirect URLs, as section 4.2 advises
-  - :client-id-pred, indieauth/client-id?, the client identifiers that
-    the server takes, as section 3.3 has them
-  - :profile-url-pred, indieauth/profile-url?, the URLs that a user can
-    sign in as, as section 3.2 has them
-  - :cors?, true: a client in a browser can read the metadata and redeem
-    its code
-  - :timeout-seconds, 10: the limit of each request to a client
-  - :max-page-bytes, 2 MB, and :max-json-bytes, 256 kB: the largest
-    page and JSON document at a client identifier
-  - :max-form-bytes, 64 kB: the largest form that a client posts
-  - :send, http/send-public!, which sends to the public internet alone,
-    so that a client identifier on the server's own network isn't
-    fetched, as section 4.2 says
+    client's name, logo and redirect URLs
+  - :client-id-pred and :profile-url-pred, the identifiers that the
+    server takes, indieauth/client-id? and indieauth/profile-url?
+  - :cors?, true: a page in any browser can read the metadata and redeem
+    a code
+  - :send, http/send-public!, which never fetches a client identifier on
+    the server's own network (section 4.2)
+  - :timeout-seconds, :max-page-bytes, :max-json-bytes and
+    :max-form-bytes, the limits of the requests to and from a client
   - :now-fn, a function that gives the instant now"
   {:scopes-supported     ["profile" "email"]
    :code-seconds         60
@@ -109,23 +90,20 @@
 ;;; stores
 
 (defn memory-store
-  "A store in the atom `a`, or in a new one, as a map of keys to values,
-  which drops each value once the instant that `now-fn` gives passes its
-  :expires.
+  "A store in the atom `a`, or in a new one, which drops each value once
+  the instant that `now-fn` gives passes its :expires.
 
-  A store is a map of functions, which can give their results as promises
-  in ClojureScript:
+  A store is a map of functions, which can give promises in ClojureScript:
 
-  - :put!, a function of a key and a value that keeps the value
-  - :get, a function of a key that gives its value, or nil
-  - :take!, a function of a key that gives its value and removes it in one
-    step, so that two calls never both get it
-  - :delete!, a function of a key that removes its value
+  - :put!, of a key and a value, which keeps the value
+  - :get, of a key, which gives its value, or nil
+  - :take!, of a key, which gives its value and removes it in one step,
+    so that two calls never both get it
+  - :delete!, of a key, which removes its value
 
   The store of codes needs :put! and :take!, and the store of tokens all
-  four. A key is the SHA-256 of a code or a token, never the text itself.
-  A value is a map that can have :expires, an instant after which it's of
-  no use, which a store can drop."
+  four. A key is the hash of a code or a token, and a value a map whose
+  :expires, an instant, says when a store can drop it."
   ([]
    (memory-store (atom {})))
   ([a]
@@ -223,26 +201,20 @@
 ;; IndieAuth 5.2, 4.2 and 10.1; RFC 6749, section 4.1.2.1
 (defn authorization-request!
   "Check the authorization request of a client with the query `fields`, a
-  map by name or pairs of a name and a value, by `opts`, and give the
-  :request, or the :error. In ClojureScript, it gives a promise.
+  map by name or pairs of a name and a value, by the `opts` of handler,
+  and give the :request, or the :error. In ClojureScript, it gives a
+  promise.
 
   The request is a map:
 
-  - :client-id, the client identifier, in canonical form
-  - :redirect-uri, :state and :code-challenge, as the client sent them
-  - :scopes, the scopes that the client asks for, a vector
-  - :me, the profile URL that the client gave as a hint, in canonical
-    form, which nobody has checked
-  - :client, the client information of client-info!, without the
-    redirect URLs, to show the user
+  - :client-id, :redirect-uri, :state and :code-challenge
+  - :scopes, a vector of the scopes that the client asks for
+  - :me, the profile URL that the client gave as an unchecked hint
+  - :client, the client information of client-info!, to show the user
 
-  The client identifier is fetched for its client information, unless
-  :client-info? is false, and a redirect URL on another scheme, host or
-  port must be among those it lists. An error has the :code of OAuth 2.0,
-  e.g. invalid_request, and the :reason. When the client and its
-  redirect URL are known, it has the :redirect too, the URL to send the
-  browser back to with the error, and else you show the user the reason.
-  Only PKCE with S256 is taken. The `opts` are those of handler."
+  An error has the :code of OAuth 2.0 and the :reason, and the :redirect
+  that sends the browser back to the client, when the client is known.
+  Without it, tell the user the reason."
   [fields opts]
   (let [{:keys [client-info?] :as opts} (options opts)
         fields       (ring/single-values (if (map? fields) (ring/param-fields fields) fields))
@@ -282,11 +254,9 @@
   :me of the user in place of the client's hint, and the :token to post
   back with the answer.
 
-  The page names the client by its :client-id, and by its :client-name,
-  :client-uri and :logo-uri from the :client, if it has them. It lists the
-  :scopes, and lets the user grant fewer. The token is signed for `me`
-  alone, so that it's also the token against cross-site requests of the
-  page's form."
+  Show the :client and the :scopes, and let the user grant fewer. The
+  token is signed for `me` alone, so it also guards the page's form
+  against cross-site requests."
   [request me opts]
   (let [{:keys [secret now-fn profile-url-pred]} (options opts)
         me (indieauth/canonical-url me)
@@ -313,17 +283,14 @@
 
   The grant is a map:
 
-  - :me, the profile URL of the user who is signed in, who must be the one
-    that consent gave the token to
+  - :me, the profile URL of the signed-in user, who must be the one that
+    consent gave the token to
   - :scopes, the scopes that the user grants, among those that the client
     asked for, all of them when nil
-  - :profile, the user's profile information, a map of :name, :url,
-    :photo and :email, which the client gets with the profile scope, the
-    email with the email scope too
+  - :profile, the user's :name, :url, :photo and :email, which the client
+    gets with the profile scope, the email with the email scope too
 
-  The code lasts :code-seconds, and works once, for the client
-  identifier, the redirect URL and the PKCE challenge of the request. Its
-  hash goes to the :put! of the :codes store of `opts`."
+  The code lasts :code-seconds and works once."
   [token {:keys [me scopes profile] :as grant} opts]
   (let [{:keys [secret now-fn request-seconds code-seconds codes issuer profile-url-pred]
          :as   opts} (options opts)
@@ -390,30 +357,25 @@
   "A Ring handler for the authorization endpoint, by `opts`.
 
   A GET is a client's authorization request, which authorization-request!
-  checks. When it's right, the handler answers with what the :authorize of
-  `opts` gives, a function of the Ring request and the checked request,
-  e.g. a page that signs the user in, or the consent page. When it's
-  wrong, the browser goes back to the client with the error, or the
-  :error-page of `opts` tells the user, a function of the Ring request and
-  the :error.
-
-  A POST redeems a code for the profile URL alone, and the JSON of the
-  answer has the :me, and the :profile when the user granted it.
+  checks. The handler answers a good one with the :authorize of `opts`, a
+  function of the Ring request and the checked request, e.g. a sign-in or
+  consent page. For a bad one, it sends the browser back to the client
+  with the error, or else answers with the :error-page of `opts`, a
+  function of the Ring request and the :error. A POST redeems a code for
+  the profile URL alone.
 
   The `opts` are those of default-options, and these:
 
-  - :issuer, the issuer identifier, an https URL that is a prefix of the
-    URL of the metadata, as section 3.1 says
-  - :authorization-endpoint and :token-endpoint, their URLs, and
-    :revocation-endpoint, :introspection-endpoint and :userinfo-endpoint,
-    for those that you serve
+  - :issuer, an https URL that is a prefix of the URL of the metadata
+  - :authorization-endpoint and :token-endpoint, and the
+    :revocation-endpoint, :introspection-endpoint and :userinfo-endpoint
+    that you serve
   - :secret, a text of 32 bytes or more, e.g. a token, that signs the
-    requests and consents of request-token and consent
+    requests and consents
   - :codes and :tokens, the stores of codes and of tokens, e.g.
     memory-store
-  - :resource-tokens, the texts with which resource servers ask the
-    introspection endpoint, which can be hidden texts, or :introspect-pred,
-    as introspection-handler has it
+  - :resource-tokens or :introspect-pred, as introspection-handler has
+    them
   - :authorize and :error-page, as above"
   [opts]
   (let [{:keys [authorize] :as opts} (options opts)]
@@ -426,21 +388,12 @@
 (defn token-handler
   "A Ring handler for the token endpoint, by the `opts` of handler.
 
-  A POST redeems a code for an access token, or a refresh token for a new
-  one, as section 5.5 says. The JSON of the answer has :access_token,
-  :token_type Bearer, :scope and :me, :profile when the user granted it,
-  :expires_in by :token-seconds, and :refresh_token by :refresh-seconds. A
-  code without a scope gives the :me alone, as section 5.3.3 says, and no
-  cache keeps an answer.
-
-  A refresh token works once, and its answer has a new one. One used
-  again revokes the grant and all its tokens, as a code used again does.
-  An older client can revoke a token here with action=revoke, by
-  :legacy-revocation?. An older resource server can verify one with a GET
-  and the token as its bearer token, by :legacy-verification?, and gets
-  the JSON of its :me, :client_id and :scope, or 401. Since the GET needs
-  no authorization of the resource server, as introspection does, anyone
-  who has a token learns whether it's valid and whose it is."
+  A POST redeems a code for an access token, or a refresh token for new
+  tokens, and a code without a scope for the :me alone. A refresh token
+  works once, and one used again revokes its grant and all its tokens, as
+  a code used again does. Older clients and resource servers can revoke
+  and verify tokens here too, by the :legacy-revocation? and
+  :legacy-verification? of default-options."
   [opts]
   (let [{:keys [legacy-verification?] :as opts} (options opts)]
     (ring/handler (cond-> {:post    #(endpoint/form-response % (fn [fields] (endpoint/token-response fields opts)) opts)
@@ -465,14 +418,11 @@
 (defn introspection-handler
   "A Ring handler for the introspection endpoint, by the `opts` of handler.
 
-  A POST asks about the access token of its form, and the JSON of the
-  answer has :active true, :me, :client_id, :scope, :iat and :exp, or
-  :active false alone. Section 6.1 says that the endpoint needs
-  authorization, so a resource server asks with one of the
-  :resource-tokens of `opts` as its bearer token. Or else the
-  :introspect-pred of `opts`, a function of the Ring request, says
-  whether it may ask, and can give a promise in ClojureScript. A request
-  that may not gets 401, which tells nothing about the token."
+  A POST asks about the access token of its form, as RFC 7662 has it. A
+  resource server asks with one of the :resource-tokens of `opts` as its
+  bearer token, and you can wrap those with wary-fetch's secret/hide. Or
+  else the :introspect-pred of `opts`, a function of the Ring request,
+  says whether it may ask (section 6.1). Others get 401."
   [opts]
   (let [{:keys [introspect-pred resource-tokens] :as opts} (options opts)
         allowed? (or introspect-pred (endpoint/resource-pred resource-tokens))
