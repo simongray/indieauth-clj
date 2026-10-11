@@ -832,7 +832,44 @@
      #(async/then (server/access! (bearer (:access_token @a)) ["create"] (remote {}))
                   (fn [a]
                     (testing "an introspection endpoint that fails"
-                      (is (= 503 (get-in a [:response :status])))))))))
+                      (is (= 503 (get-in a [:response :status]))))))
+     #(let [basic (server/introspection-handler
+                   (assoc opts :introspect-pred (fn [r] (= "Basic cnM6cHc=" (get-in r [:headers "authorization"])))))]
+        (async/then (basic {:request-method :post
+                            :headers        {"authorization" "Basic cnM6cHc="}
+                            :body           (url/query-string {"token" (:access_token @a)})})
+                    (fn [r]
+                      (testing "authorization by an :introspect-pred of your own"
+                        (is (= true (:active (answer r)))))
+                      (async/then (post basic {"token" (:access_token @a)} resource-token)
+                                  (fn [r]
+                                    (testing "in place of the resource tokens"
+                                      (is (= 401 (:status r))))))))))))
+
+(deftest legacy-verification
+  (let [opts  (assoc (phase-2-opts (atom noon)) :legacy-verification? true)
+        token (server/token-handler opts)
+        a     (atom nil)]
+    (run
+     (signed-in opts "create update" #(reset! a %))
+     #(async/then (token (bearer (:access_token @a)))
+                  (fn [r]
+                    (testing "the W3C Note, section 6.3.4: a GET verifies a token"
+                      (is (= 200 (:status r)))
+                      (is (= {:me "https://user.example/" :client_id "https://app.example/" :scope "create update"}
+                             (answer r))))))
+     #(async/then (token (bearer "made-up"))
+                  (fn [r]
+                    (testing "an invalid token"
+                      (is (= 401 (:status r))))))
+     #(async/then (token {:request-method :get :query-string (url/query-string (redemption "?code=c"))})
+                  (fn [r]
+                    (testing "S333: a GET without a token is still refused"
+                      (is (= 401 (:status r))))))
+     #(async/then ((server/token-handler (dissoc opts :legacy-verification?)) (bearer (:access_token @a)))
+                  (fn [r]
+                    (testing "and no GET at all by default"
+                      (is (= 405 (:status r)))))))))
 
 (deftest userinfo
   (let [opts (phase-2-opts (atom noon))

@@ -46,6 +46,10 @@
     has been inactive. Nil gives no refresh tokens.
   - :legacy-revocation?, true: the token endpoint revokes a token with
     action=revoke, as earlier versions of IndieAuth had it
+  - :legacy-verification?, false: the token endpoint verifies a token
+    with a GET, as the W3C Note of 2018 had it, for older resource
+    servers. It tells anyone who has a token whose it is, which is why
+    introspection replaced it, so turn it on only for one that needs it.
   - :request-seconds, 1800: how long a user has to sign in and say yes
   - :client-info?, true: the client identifier is fetched for the
     client's name, logo and redirect URLs, as section 4.2 advises
@@ -63,23 +67,24 @@
     so that a client identifier on the server's own network isn't
     fetched, as section 4.2 says
   - :now-fn, a function that gives the instant now"
-  {:scopes-supported   ["profile" "email"]
-   :code-seconds       60
-   :token-seconds      86400
-   :refresh-seconds    2592000
-   :legacy-revocation? true
-   :request-seconds    1800
-   :client-info?       true
-   :client-id-pred     indieauth/client-id?
-   :profile-url-pred   indieauth/profile-url?
-   :cors?              true
-   :timeout-seconds    10
-   :max-page-bytes     (* 2 1024 1024)
-   :max-json-bytes     (* 256 1024)
-   :max-form-bytes     (* 64 1024)
-   :send               http/send-public!
-   :now-fn             #?(:clj  #(java.util.Date.)
-                          :cljs #(js/Date.))})
+  {:scopes-supported     ["profile" "email"]
+   :code-seconds         60
+   :token-seconds        86400
+   :refresh-seconds      2592000
+   :legacy-revocation?   true
+   :legacy-verification? false
+   :request-seconds      1800
+   :client-info?         true
+   :client-id-pred       indieauth/client-id?
+   :profile-url-pred     indieauth/profile-url?
+   :cors?                true
+   :timeout-seconds      10
+   :max-page-bytes       (* 2 1024 1024)
+   :max-json-bytes       (* 256 1024)
+   :max-form-bytes       (* 64 1024)
+   :send                 http/send-public!
+   :now-fn               #?(:clj  #(java.util.Date.)
+                            :cljs #(js/Date.))})
 
 (defn- options
   "The `opts` of a server over default-options. They must name the
@@ -958,7 +963,8 @@
   - :codes and :tokens, the stores of codes and of tokens, e.g.
     memory-store
   - :resource-tokens, the texts with which resource servers ask the
-    introspection endpoint, which can be hidden texts
+    introspection endpoint, which can be hidden texts, or :introspect-pred,
+    as introspection-handler has it
   - :authorize and :error-page, as above"
   [opts]
   (let [{:keys [authorize] :as opts} (options opts)]
@@ -1264,6 +1270,18 @@
     (async/then nil (constantly (refusal {:status 401
                                           :reason "The request has no access token"})))))
 
+;; The W3C Note of IndieAuth of 23 January 2018, section 6.3.4
+(defn- legacy-verification
+  "The answer of the token endpoint to an older resource server's GET
+  `request`, which verifies the bearer token of its Authorization header,
+  by `opts`."
+  [request opts]
+  (async/then (access! request [] opts)
+              (fn [{:keys [error response me client-id scope]}]
+                (if error
+                  response
+                  (ring/json-response 200 {:me me :client_id client-id :scope scope})))))
+
 (defn token-handler
   "A Ring handler for the token endpoint, by the `opts` of handler.
 
@@ -1277,15 +1295,29 @@
   A refresh token works once, and its answer has a new one. One used
   again revokes the grant and all its tokens, as a code used again does.
   An older client can revoke a token here with action=revoke, by
-  :legacy-revocation?."
+  :legacy-revocation?. An older resource server can verify one with a GET
+  and the token as its bearer token, by :legacy-verification?, and gets
+  the JSON of its :me, :client_id and :scope, or 401. Since the GET needs
+  no authorization of the resource server, as introspection does, anyone
+  who has a token learns whether it's valid and whose it is."
   [opts]
-  (let [opts (options opts)]
+  (let [{:keys [legacy-verification?] :as opts} (options opts)]
     (ring/handler
      (fn [{:keys [request-method] :as request}]
-       (case request-method
-         :post    (form-response request #(token-response % opts) opts)
-         :options (ring/with-cors (ring/text-response 204 ""))
-         (ring/not-allowed ["POST" "OPTIONS"]))))))
+       (cond
+         (= :post request-method)
+         (form-response request #(token-response % opts) opts)
+
+         (= :options request-method)
+         (ring/with-cors (ring/text-response 204 ""))
+
+         (and legacy-verification? (= :get request-method))
+         (legacy-verification request opts)
+
+         :else
+         (ring/not-allowed (if legacy-verification?
+                             ["GET" "POST" "OPTIONS"]
+                             ["POST" "OPTIONS"])))))))
 
 ;; RFC 7009; IndieAuth 7
 (defn revocation-handler
@@ -1334,31 +1366,34 @@
 
   A POST asks about the access token of its form, and the JSON of the
   answer has :active true, :me, :client_id, :scope, :iat and :exp, or
-  :active false alone. A resource server asks with one of the
-  :resource-tokens of `opts` as its bearer token, since section 6.1 says
-  that the endpoint needs authorization. A request without it gets 401,
-  which tells nothing about the token."
+  :active false alone. Section 6.1 says that the endpoint needs
+  authorization, so a resource server asks with one of the
+  :resource-tokens of `opts` as its bearer token. Or else the
+  :introspect-pred of `opts`, a function of the Ring request, says
+  whether it may ask, and can give a promise in ClojureScript. A request
+  that may not gets 401, which tells nothing about the token."
   [opts]
-  (let [opts (options opts)]
+  (let [{:keys [introspect-pred] :as opts} (options opts)
+        allowed?                           (or introspect-pred
+                                               #(resource-server? % opts))]
     (ring/handler
      (fn [{:keys [request-method] :as request}]
-       (cond
-         (not= :post request-method)
+       (if (not= :post request-method)
          (ring/not-allowed ["POST"])
-
-         (not (resource-server? request opts))
-         (problem-response {:status 401
-                            :code   "invalid_token"
-                            :reason "The request needs the token of a resource server"})
-
-         :else
-         (form-response request
-                        (fn [{:strs [token]}]
-                          (async/then (token-info! token opts)
-                                      #(ring/json-response 200 (if %
-                                                                 (introspection %)
-                                                                 {:active false}))))
-                        opts))))))
+         (async/then
+          (allowed? request)
+          (fn [ok?]
+            (if ok?
+              (form-response request
+                             (fn [{:strs [token]}]
+                               (async/then (token-info! token opts)
+                                           #(ring/json-response 200 (if %
+                                                                      (introspection %)
+                                                                      {:active false}))))
+                             opts)
+              (problem-response {:status 401
+                                 :code   "invalid_token"
+                                 :reason "The request needs the token of a resource server"})))))))))
 
 ;; IndieAuth 9
 (defn userinfo-handler
