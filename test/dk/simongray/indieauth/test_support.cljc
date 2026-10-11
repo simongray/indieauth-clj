@@ -9,7 +9,7 @@
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.headers :as headers]
+            #?(:clj [dk.simongray.wary-fetch.headers :as headers])
             [dk.simongray.wary-fetch.url :as url])
   #?(:clj (:import [com.sun.net.httpserver HttpExchange HttpHandler HttpServer]
                    [java.net InetSocketAddress]

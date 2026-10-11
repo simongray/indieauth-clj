@@ -493,7 +493,7 @@
   (when (and (map? profile) (some #{"profile"} scopes))
     (not-empty
      (into {}
-           (filter (fn [[k v]] (and (string? v) (seq v))))
+           (filter (fn [[_ v]] (and (string? v) (seq v))))
            (select-keys profile (cond-> [:name :url :photo]
                                   (some #{"email"} scopes) (conj :email)))))))
 

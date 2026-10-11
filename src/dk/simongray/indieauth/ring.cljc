@@ -3,7 +3,7 @@
   (:require [clojure.string :as str]
             [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.json :as json]
-            [dk.simongray.wary-fetch.async :as async]
+            #?(:clj [dk.simongray.wary-fetch.async :as async])
             [dk.simongray.wary-fetch.url :as url])
   #?(:clj (:import [java.io InputStream])))
 

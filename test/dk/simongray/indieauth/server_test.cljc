@@ -3,7 +3,8 @@
   the token endpoint, the stores, client information, profile information
   and the checks of a resource server. A case of indieauth.rocks's server
   tests is named by its number, with clients of the test's own."
-  (:require [clojure.string :as str]
+  (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.json :as json]
@@ -89,7 +90,7 @@
   "The authorization request that the :authorize of server-opts got, from
   the body of its `response`."
   [response]
-  (#?(:clj read-string :cljs cljs.reader/read-string) (:body response)))
+  (edn/read-string (:body response)))
 
 (deftest metadata
   (let [opts (server-opts)

@@ -710,21 +710,20 @@
 
   The page about the client is a prefix of the client identifier, as the
   spec says."
-  [{:keys [client-id client-name client-uri logo-uri redirect-uris]
-    :or   {client-uri client-id}
-    :as   opts}]
-  (when-not (client-id? client-id)
-    (throw (ex-info "The :client-id isn't a valid client identifier"
-                    {:client-id client-id})))
-  (when-not (and (url/web-url? client-uri)
-                 (str/starts-with? client-id client-uri))
-    (throw (ex-info "The :client-uri is a prefix of the :client-id"
-                    {:client-id client-id :client-uri client-uri})))
-  (cond-> {:client_id  client-id
-           :client_uri client-uri}
-    client-name         (assoc :client_name client-name)
-    logo-uri            (assoc :logo_uri logo-uri)
-    (seq redirect-uris) (assoc :redirect_uris (vec redirect-uris))))
+  [{:keys [client-id client-name client-uri logo-uri redirect-uris] :as opts}]
+  (let [page (or client-uri client-id)]
+    (when-not (client-id? client-id)
+      (throw (ex-info "The :client-id isn't a valid client identifier"
+                      {:client-id client-id})))
+    (when-not (and (url/web-url? page)
+                   (str/starts-with? client-id page))
+      (throw (ex-info "The :client-uri is a prefix of the :client-id"
+                      {:client-id client-id :client-uri page})))
+    (cond-> {:client_id  client-id
+             :client_uri page}
+      client-name         (assoc :client_name client-name)
+      logo-uri            (assoc :logo_uri logo-uri)
+      (seq redirect-uris) (assoc :redirect_uris (vec redirect-uris)))))
 
 (defn client-metadata-handler
   "A Ring handler that serves the client metadata document of the `opts`

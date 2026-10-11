@@ -2,7 +2,8 @@
   "A client and a server of this library, the one signing a user in at the
   other with a browser in between, as a site and an app would use them. On
   the JVM they talk over HTTP on localhost too."
-  (:require [clojure.string :as str]
+  (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.ring :as ring]
@@ -140,7 +141,7 @@
                     (testing "the user says yes, and the browser goes back to the app"
                       (is (= 200 status) body)
                       (is (str/starts-with? url "https://app.example/callback?code=")))
-                    (let [a (#?(:clj read-string :cljs cljs.reader/read-string) body)]
+                    (let [a (edn/read-string body)]
                       (testing "the app knows who the user is, and has a token"
                         (is (= "https://user.example/" (:me a)))
                         (is (= {:name "Ann" :url "https://user.example/"} (:profile a)))
