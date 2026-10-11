@@ -101,10 +101,23 @@
               :token_endpoint                                 "https://auth.example/token"
               :scopes_supported                               ["profile" "email" "create" "update"]
               :response_types_supported                       ["code"]
-              :grant_types_supported                          ["authorization_code"]
+              :grant_types_supported                          ["authorization_code" "refresh_token"]
               :code_challenge_methods_supported               ["S256"]
               :authorization_response_iss_parameter_supported true}
              m)))
+    (testing "S108 and S113: the endpoints of phase 2, and revocation without client authentication"
+      (is (= {:introspection_endpoint                     "https://auth.example/introspect"
+              :revocation_endpoint                        "https://auth.example/revoke"
+              :revocation_endpoint_auth_methods_supported ["none"]
+              :userinfo_endpoint                          "https://auth.example/userinfo"}
+             (select-keys (server/metadata (assoc opts
+                                                  :introspection-endpoint "https://auth.example/introspect"
+                                                  :revocation-endpoint "https://auth.example/revoke"
+                                                  :userinfo-endpoint "https://auth.example/userinfo"))
+                          [:introspection_endpoint :revocation_endpoint
+                           :revocation_endpoint_auth_methods_supported :userinfo_endpoint])))
+      (is (= ["authorization_code"] (:grant_types_supported (server/metadata (assoc opts :refresh-seconds nil))))
+          "without refresh tokens"))
     (testing "S104 and S114: JSON that a page can read"
       (let [r ((server/metadata-handler opts) {:request-method :get})]
         (is (= 200 (:status r)))
@@ -369,8 +382,9 @@
                               :me         "https://user.example/"
                               :expires_in 3600
                               :profile    {:name "Ann"}}
-                             (dissoc a :access_token))
-                          "S409: the profile that the scopes grant, of texts"))
+                             (dissoc a :access_token :refresh_token))
+                          "S409: the profile that the scopes grant, of texts")
+                      (is (string? (:refresh_token a)) "and a refresh token"))
                     (testing "S406: no cache keeps it"
                       (is (= "no-store" (get-in r [:headers "Cache-Control"]))))
                     (testing "S410: an access token that nobody can guess"
@@ -515,7 +529,8 @@
         opts  {:tokens (server/memory-store (atom {}) #(deref clock)) :now-fn #(deref clock)}
         info  {:me "https://user.example/" :client-id "https://app.example/" :scope "create update"
                :issued-at noon :expires #inst "2026-10-11T13:00:00Z"}]
-    ((:put! (:tokens opts)) (server/hash-key "the-token") info)
+    ((:put! (:tokens opts)) (server/hash-key "the-token") (assoc info :type :access))
+    ((:put! (:tokens opts)) (server/hash-key "a-refresh-token") (assoc info :type :refresh))
     (testing "RFC 6750: the token of a request"
       (is (= "the-token" (server/bearer-token {:headers {"authorization" "Bearer the-token"}})))
       (is (= "the-token" (server/bearer-token {:headers {"authorization" "bearer  the-token "}})))
@@ -540,6 +555,10 @@
                     (testing "an unknown token"
                       (is (= 401 (get-in a [:response :status])))
                       (is (= "invalid_token" (get-in a [:error :code]))))))
+     #(async/then (server/access! {:headers {"authorization" "Bearer a-refresh-token"}} ["create"] opts)
+                  (fn [a]
+                    (testing "a refresh token is no access token"
+                      (is (= "invalid_token" (get-in a [:error :code]))))))
      #(async/then (server/access! {:headers {}} ["create"] opts)
                   (fn [a]
                     (testing "no token, and an answer that says no more"
@@ -550,3 +569,294 @@
                       (fn [i]
                         (testing "an expired token"
                           (is (nil? i)))))))))
+
+;; phase 2: refresh tokens, revocation, introspection and userinfo
+
+(def resource-token "the-token-of-a-resource-server")
+
+(defn- phase-2-opts
+  "The options of a server with the endpoints of phase 2, whose clock is in
+  the atom `clock`."
+  [clock]
+  (assoc (server-opts clock (atom []))
+         :revocation-endpoint    "https://auth.example/revoke"
+         :introspection-endpoint "https://auth.example/introspect"
+         :userinfo-endpoint      "https://auth.example/userinfo"
+         :resource-tokens        [resource-token]))
+
+(defn- signed-in
+  "A step that signs the user in at the server of `opts` with the `scope`,
+  and calls `f` with the answer of the token endpoint."
+  [opts scope f]
+  (code-step opts (request-params "scope" scope)
+             {:profile {:name "Ann" :url "https://user.example/" :email "ann@user.example"}}
+             {}
+             (fn [r _] (f (answer r)))))
+
+(defn- post
+  "The response of the handler `h` to a POST of the form `fields`, with the
+  bearer `token` when it's given."
+  ([h fields]
+   (post h fields nil))
+  ([h fields token]
+   (h {:request-method :post
+       :headers        (cond-> {"content-type" "application/x-www-form-urlencoded"}
+                         token (assoc "authorization" (str "Bearer " token)))
+       :body           (url/query-string fields)})))
+
+(defn- bearer
+  "A GET with the bearer `token`."
+  [token]
+  {:request-method :get :headers {"authorization" (str "Bearer " token)}})
+
+(defn- refresh-fields
+  "The fields of a refresh of the `refresh-token` by the app, with `more`."
+  [refresh-token & {:as more}]
+  (merge {"grant_type"    "refresh_token"
+          "refresh_token" refresh-token
+          "client_id"     "https://app.example/"}
+         more))
+
+(deftest refresh-tokens
+  (let [opts   (phase-2-opts (atom noon))
+        token  (server/token-handler opts)
+        first  (atom nil)
+        newest (atom nil)]
+    (run
+     (signed-in opts "profile create update" #(reset! first %))
+     #(async/then (post token (refresh-fields (:refresh_token @first)))
+                  (fn [r]
+                    (let [a (answer r)]
+                      (testing "S501: a new access token with the me, which no cache keeps"
+                        (is (= 200 (:status r)))
+                        (is (= "no-store" (get-in r [:headers "Cache-Control"])))
+                        (is (= {:me         "https://user.example/"
+                                :scope      "profile create update"
+                                :token_type "Bearer"
+                                :expires_in 86400
+                                :profile    {:name "Ann" :url "https://user.example/"}}
+                               (dissoc a :access_token :refresh_token)))
+                        (is (not= (:access_token @first) (:access_token a))))
+                      (testing "and a new refresh token, since one works once"
+                        (is (string? (:refresh_token a)))
+                        (is (not= (:refresh_token @first) (:refresh_token a))))
+                      (reset! newest a))))
+     #(async/then (post token (refresh-fields (:refresh_token @newest) "client_id" "https://other.example/"))
+                  (fn [r]
+                    (testing "S502: not for another client"
+                      (is (= "invalid_grant" (:error (answer r)))))))
+     #(async/then (post token (refresh-fields (:refresh_token @newest) "scope" "create delete"))
+                  (fn [r]
+                    (testing "S503: not for more scopes"
+                      (is (= "invalid_scope" (:error (answer r)))))))
+     #(async/then (post token (refresh-fields (:refresh_token @newest) "scope" "create"))
+                  (fn [r]
+                    (let [a (answer r)]
+                      (testing "for fewer scopes"
+                        (is (= "create" (:scope a)))
+                        (is (nil? (:profile a)) "and no profile without the profile scope"))
+                      (reset! newest a))))
+     #(async/then (post token (refresh-fields (:refresh_token @newest)))
+                  (fn [r]
+                    (let [a (answer r)]
+                      (testing "section 5.5.1: the new refresh token keeps the scopes of the old"
+                        (is (= "profile create update" (:scope a))))
+                      (reset! newest a))))
+     #(async/then (post token (refresh-fields (:refresh_token @first)))
+                  (fn [r]
+                    (testing "S504: an old refresh token stops working"
+                      (is (= "invalid_grant" (:error (answer r)))))))
+     #(async/then (server/token-info! (:access_token @newest) opts)
+                  (fn [i]
+                    (testing "S505: and using it revokes the grant, the newest tokens too"
+                      (is (nil? i)))))
+     #(async/then (post token (refresh-fields (:refresh_token @newest)))
+                  (fn [r]
+                    (is (= "invalid_grant" (:error (answer r)))))))))
+
+(deftest token-lifetimes
+  (let [clock (atom noon)
+        opts  (phase-2-opts clock)
+        token (server/token-handler opts)
+        a     (atom nil)]
+    (run
+     (signed-in opts "create" #(reset! a %))
+     #(do (swap! clock seconds-after 86400)
+          (async/then (server/token-info! (:access_token @a) opts)
+                      (fn [i]
+                        (testing "an access token lasts a day"
+                          (is (nil? i))))))
+     #(async/then (post token (refresh-fields (:refresh_token @a)))
+                  (fn [r]
+                    (testing "and its refresh token lasts longer"
+                      (is (= 200 (:status r))))
+                    (reset! a (answer r))))
+     #(do (swap! clock seconds-after (* 30 86400))
+          (async/then (post token (refresh-fields (:refresh_token @a)))
+                      (fn [r]
+                        (testing "but a refresh token unused for 30 days expires"
+                          (is (= "invalid_grant" (:error (answer r))))))))
+     (signed-in (assoc opts :refresh-seconds nil :token-seconds nil) "create" #(reset! a %))
+     #(async/then (post token (refresh-fields "anything"))
+                  (fn [_]
+                    (testing "without refresh tokens, a token that lasts for ever"
+                      (is (nil? (:refresh_token @a)))
+                      (is (nil? (:expires_in @a))))))
+     #(async/then (post (server/token-handler (assoc opts :refresh-seconds nil)) (refresh-fields "anything"))
+                  (fn [r]
+                    (testing "and no refresh grant"
+                      (is (= "unsupported_grant_type" (:error (answer r))))))))))
+
+(deftest code-reuse
+  (let [opts     (phase-2-opts (atom noon))
+        token    (server/token-handler opts)
+        first    (atom nil)
+        redirect (atom nil)]
+    (run
+     (code-step opts (request-params) {} {}
+                (fn [r rd]
+                  (reset! first (answer r))
+                  (reset! redirect rd)))
+     #(async/then (post token (redemption @redirect))
+                  (fn [r]
+                    (testing "S302: a code works once"
+                      (is (= "invalid_grant" (:error (answer r)))))))
+     #(async/then (server/token-info! (:access_token @first) opts)
+                  (fn [i]
+                    (testing "S303: a code used again revokes the tokens it gave"
+                      (is (nil? i)))))
+     #(async/then (post token (refresh-fields (:refresh_token @first)))
+                  (fn [r]
+                    (testing "its refresh token too"
+                      (is (= "invalid_grant" (:error (answer r))))))))))
+
+(deftest revocation
+  (let [opts     (phase-2-opts (atom noon))
+        revoke   (server/revocation-handler opts)
+        token    (server/token-handler opts)
+        userinfo (server/userinfo-handler opts)
+        a        (atom nil)
+        b        (atom nil)]
+    (run
+     (signed-in opts "profile create" #(reset! a %))
+     #(async/then (post revoke {"token" (:access_token @a)})
+                  (fn [r]
+                    (testing "S601: an access token"
+                      (is (= 200 (:status r))))))
+     #(async/then (userinfo (bearer (:access_token @a)))
+                  (fn [r]
+                    (testing "S602: which stops working"
+                      (is (= 401 (:status r))))))
+     #(async/then (post token (refresh-fields (:refresh_token @a)))
+                  (fn [r]
+                    (testing "while its refresh token still works"
+                      (is (= 200 (:status r))))
+                    (reset! b (answer r))))
+     #(async/then (post revoke {"token" (:refresh_token @b) "token_type_hint" "refresh_token"})
+                  (fn [r]
+                    (testing "S603: a refresh token"
+                      (is (= 200 (:status r))))))
+     #(async/then (post token (refresh-fields (:refresh_token @b)))
+                  (fn [r]
+                    (testing "which stops working"
+                      (is (= "invalid_grant" (:error (answer r)))))))
+     #(async/then (server/token-info! (:access_token @b) opts)
+                  (fn [i]
+                    (testing "RFC 7009, section 2.1: and so do the access tokens of its grant"
+                      (is (nil? i)))))
+     #(async/then (post revoke {"token" "made-up"})
+                  (fn [r]
+                    (testing "S604: an unknown token"
+                      (is (= 200 (:status r))))))
+     #(async/then (post revoke {})
+                  (fn [r]
+                    (testing "no token"
+                      (is (= "invalid_request" (:error (answer r)))))))
+     (signed-in opts "create" #(reset! a %))
+     #(async/then (post token {"action" "revoke" "token" (:access_token @a)})
+                  (fn [r]
+                    (testing "section 7.1: action=revoke at the token endpoint, as earlier versions had it"
+                      (is (= 200 (:status r))))))
+     #(async/then (server/token-info! (:access_token @a) opts)
+                  (fn [i]
+                    (is (nil? i)))))))
+
+(deftest introspection
+  (let [opts   (phase-2-opts (atom noon))
+        h      (server/introspection-handler opts)
+        a      (atom nil)
+        at     (quot (inst-ms noon) 1000)
+        remote (fn [routes]
+                 {:introspection-endpoint "https://auth.example/introspect"
+                  :resource-token         resource-token
+                  :send                   (t/network routes)})]
+    (run
+     (signed-in opts "create" #(reset! a %))
+     #(async/then (post h {"token" (:access_token @a)})
+                  (fn [r]
+                    (testing "S801 and S802: not without authorization, which says nothing"
+                      (is (= 401 (:status r)))
+                      (is (not (str/includes? (:body r) "active")))
+                      (is (not (str/includes? (:body r) "user.example"))))))
+     #(async/then (post h {"token" (:access_token @a)} "a wrong token")
+                  (fn [r]
+                    (is (= 401 (:status r)))))
+     #(async/then (post h {"token" (:access_token @a)} resource-token)
+                  (fn [r]
+                    (testing "S803: an active token"
+                      (is (= {:active    true
+                              :me        "https://user.example/"
+                              :client_id "https://app.example/"
+                              :scope     "create"
+                              :iat       at
+                              :exp       (+ at 86400)}
+                             (answer r))))))
+     #(async/then (post h {"token" "made-up"} resource-token)
+                  (fn [r]
+                    (testing "S804: an invalid token, without more"
+                      (is (= {:active false} (answer r))))))
+     #(async/then (post h {"token" (:refresh_token @a)} resource-token)
+                  (fn [r]
+                    (testing "a refresh token isn't an active access token"
+                      (is (= {:active false} (answer r))))))
+     #(async/then (server/access! (bearer (:access_token @a)) ["create"]
+                                  (remote {"https://auth.example/introspect" h}))
+                  (fn [info]
+                    (testing "section 6: a resource server in another process"
+                      (is (= {:me        "https://user.example/"
+                              :client-id "https://app.example/"
+                              :scope     "create"
+                              :issued-at noon
+                              :expires   (seconds-after noon 86400)}
+                             info)))))
+     #(async/then (server/access! (bearer (:access_token @a)) ["create"] (remote {}))
+                  (fn [a]
+                    (testing "an introspection endpoint that fails"
+                      (is (= 503 (get-in a [:response :status])))))))))
+
+(deftest userinfo
+  (let [opts (phase-2-opts (atom noon))
+        h    (server/userinfo-handler opts)
+        a    (atom nil)]
+    (run
+     (signed-in opts "profile email create" #(reset! a %))
+     #(async/then (h (bearer (:access_token @a)))
+                  (fn [r]
+                    (testing "S701: the profile of the token response"
+                      (is (= 200 (:status r)))
+                      (is (= {:name "Ann" :url "https://user.example/" :email "ann@user.example"} (answer r)))
+                      (is (= (:profile @a) (answer r))))))
+     #(async/then (h {:request-method :get :headers {}})
+                  (fn [r]
+                    (testing "S702: not without a token"
+                      (is (= 401 (:status r))))))
+     #(async/then (h (bearer "made-up"))
+                  (fn [r]
+                    (testing "S703: not with an invalid token"
+                      (is (= 401 (:status r)))
+                      (is (= "invalid_token" (:error (answer r)))))))
+     (signed-in opts "create" #(reset! a %))
+     #(async/then (h (bearer (:access_token @a)))
+                  (fn [r]
+                    (testing "not without the profile scope"
+                      (is (= 403 (:status r)))))))))

@@ -1,7 +1,8 @@
 (ns dk.simongray.indieauth.server
-  "An IndieAuth server: the authorization endpoint, the token endpoint and
-  the metadata document, and the checks of an access token that a resource
-  server such as a Micropub endpoint makes.
+  "An IndieAuth server: the authorization, token, revocation,
+  introspection and userinfo endpoints and the metadata document, and the
+  checks of an access token that a resource server such as a Micropub
+  endpoint makes.
 
   Signing the user in and asking for their consent are yours to do. The
   authorization endpoint checks a client's request and gives it to a
@@ -26,6 +27,7 @@
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
+            [dk.simongray.wary-fetch.secret :as secret]
             [dk.simongray.wary-fetch.url :as url]))
 
 (def default-options
@@ -36,7 +38,14 @@
     email. Add those of your resource servers, e.g. create for Micropub.
   - :code-seconds, 60: how long a code lasts, well within the 10 minutes
     that section 5.2.1 recommends at most
-  - :token-seconds, nil: how long an access token lasts, for ever when nil
+  - :token-seconds, 86400: how long an access token lasts, a day, or for
+    ever when nil. Section 5.5 recommends short-lived tokens with refresh
+    tokens.
+  - :refresh-seconds, 2592000: how long a refresh token lasts unused, 30
+    days, since section 5.5 says that one should expire when a client
+    has been inactive. Nil gives no refresh tokens.
+  - :legacy-revocation?, true: the token endpoint revokes a token with
+    action=revoke, as earlier versions of IndieAuth had it
   - :request-seconds, 1800: how long a user has to sign in and say yes
   - :client-info?, true: the client identifier is fetched for the
     client's name, logo and redirect URLs, as section 4.2 advises
@@ -54,21 +63,23 @@
     so that a client identifier on the server's own network isn't
     fetched, as section 4.2 says
   - :now-fn, a function that gives the instant now"
-  {:scopes-supported ["profile" "email"]
-   :code-seconds     60
-   :token-seconds    nil
-   :request-seconds  1800
-   :client-info?     true
-   :client-id-pred   indieauth/client-id?
-   :profile-url-pred indieauth/profile-url?
-   :cors?            true
-   :timeout-seconds  10
-   :max-page-bytes   (* 2 1024 1024)
-   :max-json-bytes   (* 256 1024)
-   :max-form-bytes   (* 64 1024)
-   :send             http/send-public!
-   :now-fn           #?(:clj  #(java.util.Date.)
-                        :cljs #(js/Date.))})
+  {:scopes-supported   ["profile" "email"]
+   :code-seconds       60
+   :token-seconds      86400
+   :refresh-seconds    2592000
+   :legacy-revocation? true
+   :request-seconds    1800
+   :client-info?       true
+   :client-id-pred     indieauth/client-id?
+   :profile-url-pred   indieauth/profile-url?
+   :cors?              true
+   :timeout-seconds    10
+   :max-page-bytes     (* 2 1024 1024)
+   :max-json-bytes     (* 256 1024)
+   :max-form-bytes     (* 64 1024)
+   :send               http/send-public!
+   :now-fn             #?(:clj  #(java.util.Date.)
+                          :cljs #(js/Date.))})
 
 (defn- options
   "The `opts` of a server over default-options. They must name the
@@ -552,7 +563,84 @@
                                     ["state" (:state request)]
                                     ["iss" issuer]])}))))))
 
-;;; redemption
+;;; grants and tokens
+
+;; A grant is what a user granted a client with a code. Its access and
+;; refresh tokens belong to it, so that revoking it revokes them all. The
+;; store of tokens keeps it under a key of its own, with the keys of its
+;; tokens and when each expires.
+
+(defn- grant-key
+  "The key of the grant `id` in a store of tokens, which no hash can be."
+  [id]
+  (str "grant:" id))
+
+(defn- latest
+  "The latest of the instants `xs`, or nil when one of them is nil, which
+  is never."
+  [xs]
+  (when (every? some? xs)
+    (last (sort-by inst-ms xs))))
+
+(defn- revoke-grant!
+  "Delete the grant `id`, and each of its tokens, from the :tokens store of
+  `opts`."
+  [id {:keys [tokens] :as opts}]
+  (async/then ((:get tokens) (grant-key id))
+              (fn [grant]
+                (async/then (async/all (:delete! tokens) (keys (:tokens grant)))
+                            (fn [_] ((:delete! tokens) (grant-key id)))))))
+
+;; IndieAuth 5.3.2
+(defn- profile-answer
+  "The answer to the redemption of the code of `entry` for the profile URL
+  alone."
+  [{:keys [me profile] :as entry}]
+  (cond-> {:me me}
+    profile (assoc :profile profile)))
+
+;; IndieAuth 5.3.3 and 5.5; RFC 6749, section 5.1
+(defn- issue-tokens!
+  "Issue an access token of the `scope` for the `grant` of `id`, a map of
+  :me, :client-id, :scope, :profile and the :tokens it has, and a refresh
+  token by the :refresh-seconds of `opts`, keep them in its :tokens store
+  with the grant, and give the answer of the token endpoint."
+  [id {:keys [me client-id profile] :as grant} scope
+   {:keys [tokens token-seconds refresh-seconds now-fn] :as opts}]
+  (let [at       (now-fn)
+        access   (indieauth/token)
+        refresh  (when refresh-seconds (indieauth/token))
+        expires  (when token-seconds (later at token-seconds))
+        entries  (cond-> {(hash-key access) {:type      :access
+                                             :grant     id
+                                             :me        me
+                                             :client-id client-id
+                                             :scope     scope
+                                             :issued-at at
+                                             :expires   expires}}
+                   refresh (assoc (hash-key refresh) {:type      :refresh
+                                                      :grant     id
+                                                      :client-id client-id
+                                                      :scope     (:scope grant)
+                                                      :expires   (later at refresh-seconds)}))
+        live     (into (into {} (remove #(some-> (val %) inst-ms (<= (inst-ms at))))
+                             (:tokens grant))
+                       (update-vals entries :expires))
+        grant    (assoc grant :tokens live :expires (latest (vals live)))]
+    (async/then (async/all (fn [[k v]] ((:put! tokens) k v))
+                           (assoc entries (grant-key id) grant))
+                (fn [_]
+                  (cond-> (assoc (profile-answer
+                                  {:me      me
+                                   :profile (when (some #{"profile"} (indieauth/scopes scope))
+                                              profile)})
+                                 :access_token access
+                                 :token_type   "Bearer"
+                                 :scope        scope)
+                    token-seconds (assoc :expires_in token-seconds)
+                    refresh       (assoc :refresh_token refresh))))))
+
+;;; redemption and refresh
 
 (defn- grant-error
   "The :error of an OAuth 2.0 token request of the `code` and the
@@ -560,8 +648,14 @@
   [code reason]
   {:error {:code code :reason reason}})
 
+(defn- repeated-field
+  "The name of a field that comes more than once in the single-valued
+  `fields`, or nil."
+  [fields]
+  (some (fn [[k v]] (when (= ::ring/repeated v) k)) fields))
+
 ;; IndieAuth 5.3.1; RFC 7636, section 4.6
-(defn- entry-problem
+(defn- code-problem
   "What's wrong with the `entry` of a code, redeemed with the single-valued
   `fields` at the instant `at`, or nil."
   [entry fields at]
@@ -578,73 +672,138 @@
                         (bytes/encode (:code-challenge entry))))
       "The code_verifier doesn't fit the code_challenge")))
 
-(defn- fields-problem
-  "The :error of the single-valued `fields` of a redemption at the
-  `endpoint`, :token or :authorization, before the code is taken, or nil."
-  [fields endpoint]
-  (let [{:strs [grant_type code client_id redirect_uri]} fields
-        repeated (some (fn [[k v]] (when (= ::ring/repeated v) k)) fields)]
-    (cond
-      repeated
-      (grant-error "invalid_request" (str repeated " is repeated"))
+;; RFC 6749, sections 4.1.2 and 10.5; RFC 9700, section 4.5: a code used
+;; again revokes the tokens that it gave
+(defn- redeem-code!
+  "The entry of the code that the single-valued `fields` redeem, taken from
+  the :codes store of `opts`, with its :key, or the :error. A code is taken
+  before it's checked, so that it works once, even with a wrong verifier.
+  A code used before revokes the grant of its tokens."
+  [fields {:keys [codes now-fn] :as opts}]
+  (let [{:strs [code client_id redirect_uri]} fields
+        k                                     (hash-key (str code))]
+    (if (some empty? [code client_id redirect_uri])
+      (async/then nil (constantly (grant-error "invalid_request"
+                                               "code, client_id and redirect_uri are needed")))
+      (async/then
+       ((:take! codes) k)
+       (fn [entry]
+         (if (:used? entry)
+           (async/then (some-> (:grant entry) (revoke-grant! opts))
+                       (constantly (grant-error "invalid_grant"
+                                                "The code was used before, so its tokens are revoked")))
+           (if-let [problem (code-problem entry fields (now-fn))]
+             (grant-error "invalid_grant" problem)
+             {:key k :entry entry})))))))
 
-      ;; the authorization endpoint takes the redemptions of older clients,
-      ;; which have no grant_type
-      (and (nil? grant_type) (= :token endpoint))
-      (grant-error "invalid_request" "grant_type is missing")
+(defn- used!
+  "Keep in the :codes store of `opts` that the code of key `k` and `entry`
+  was used, with the `grant` id of its tokens, if any, until it would have
+  expired."
+  [k entry grant {:keys [codes] :as opts}]
+  ((:put! codes) k (cond-> {:used? true :expires (:expires entry)}
+                     grant (assoc :grant grant))))
 
-      (not (contains? #{nil "authorization_code"} grant_type))
-      (grant-error "unsupported_grant_type" "grant_type must be authorization_code")
-
-      (some empty? [code client_id redirect_uri])
-      (grant-error "invalid_request" "code, client_id and redirect_uri are needed"))))
-
-(defn- redeem!
-  "The entry of the code that the single-valued `fields` redeem at the
-  `endpoint`, :token or :authorization, taken from the :codes store of
-  `opts`, or the :error. A code is taken before it's checked, so that it
-  works once, even with a wrong verifier."
-  [fields endpoint {:keys [codes now-fn] :as opts}]
-  (if-let [error (fields-problem fields endpoint)]
-    (async/then nil (constantly error))
-    (async/then ((:take! codes) (hash-key (get fields "code")))
-                (fn [entry]
-                  (if-let [problem (entry-problem entry fields (now-fn))]
-                    (grant-error "invalid_grant" problem)
-                    {:entry entry})))))
-
-;; IndieAuth 5.3.2
-(defn- profile-answer
-  "The answer to the redemption of the code of `entry` for the profile URL
-  alone."
-  [{:keys [me profile] :as entry}]
-  (cond-> {:me me}
-    profile (assoc :profile profile)))
-
-;; IndieAuth 5.3.3; RFC 6750
-(defn- issue-token!
-  "Issue an access token for the code of `entry`, kept in the :tokens store
-  of `opts`, and give the answer of the token endpoint. A code without a
-  scope gives the profile URL alone, as section 5.3.3 says."
-  [{:keys [me client-id scopes] :as entry}
-   {:keys [tokens token-seconds now-fn] :as opts}]
+(defn- code-answer!
+  "The answer of the token endpoint to the redemption of the code of key
+  `k` and `entry`, by `opts`: tokens for a code with a scope, and else
+  the profile URL alone, as section 5.3.3 says."
+  [{k :key {:keys [me client-id scopes profile] :as entry} :entry} opts]
   (if (empty? scopes)
-    (profile-answer entry)
-    (let [token   (indieauth/token)
-          at      (now-fn)
-          scope   (indieauth/scope-text scopes)
-          info    (cond-> {:me        me
-                           :client-id client-id
-                           :scope     scope
-                           :issued-at at}
-                    token-seconds (assoc :expires (later at token-seconds)))]
-      (async/then ((:put! tokens) (hash-key token) info)
-                  (fn [_]
-                    (cond-> (assoc (profile-answer entry)
-                                   :access_token token
-                                   :token_type   "Bearer"
-                                   :scope        scope)
-                      token-seconds (assoc :expires_in token-seconds)))))))
+    (async/then (used! k entry nil opts) (constantly (profile-answer entry)))
+    (let [id    (indieauth/token 16)
+          scope (indieauth/scope-text scopes)]
+      (async/then (issue-tokens! id
+                                 {:me me :client-id client-id :scope scope :profile profile}
+                                 scope
+                                 opts)
+                  (fn [answer]
+                    (async/then (used! k entry id opts) (constantly answer)))))))
+
+;; IndieAuth 5.5.1; RFC 6749, section 6
+(defn- refresh-problem
+  "What's wrong with refreshing the refresh token of `entry` with the
+  single-valued `fields` at the instant `at`, as a pair of the error code
+  and the reason, or nil."
+  [entry fields at]
+  (let [{:strs [client_id scope]} fields
+        asked                     (indieauth/scopes scope)
+        granted                   (set (indieauth/scopes (:scope entry)))]
+    (cond
+      (not= :refresh (:type entry))
+      ["invalid_grant" "The refresh token is unknown, or revoked"]
+
+      (expired? entry at)
+      ["invalid_grant" "The refresh token has expired"]
+
+      (not= (:client-id entry) (indieauth/canonical-url client_id))
+      ["invalid_grant" "The refresh token is another client's"]
+
+      (nil? asked)
+      ["invalid_scope" "scope has a scope that isn't valid"]
+
+      (not-every? granted asked)
+      ["invalid_scope" "scope asks for more than was granted"])))
+
+(defn- rotate!
+  "Replace the refresh token of key `k` and `entry`, which has just been
+  taken from the :tokens store of `opts`, with new tokens of the `scope`,
+  or of the grant's when it's empty, and keep that the old one was used."
+  [k {:keys [grant] :as entry} scope {:keys [tokens] :as opts}]
+  (async/then ((:get tokens) (grant-key grant))
+              (fn [g]
+                (if (nil? g)
+                  (grant-error "invalid_grant" "The grant is revoked")
+                  (async/then ((:put! tokens) k (assoc entry :used? true))
+                              (fn [_]
+                                (issue-tokens! grant g (or (indieauth/scope-text scope)
+                                                           (:scope g))
+                                               opts)))))))
+
+;; IndieAuth 5.5.1; RFC 9700, section 4.14.2: a refresh token used again
+;; revokes its grant
+(defn- refresh!
+  "The answer of the token endpoint to the refresh of the single-valued
+  `fields`, by the :tokens store of `opts`, or the :error."
+  [fields {:keys [tokens now-fn] :as opts}]
+  (let [{:strs [refresh_token client_id scope]} fields
+        k                                       (hash-key (str refresh_token))]
+    (if (some empty? [refresh_token client_id])
+      (async/then nil (constantly (grant-error "invalid_request"
+                                               "refresh_token and client_id are needed")))
+      (async/then
+       ((:get tokens) k)
+       (fn [entry]
+         (let [[code reason] (refresh-problem entry fields (now-fn))]
+           (cond
+             (and (= :refresh (:type entry)) (:used? entry))
+             (async/then (revoke-grant! (:grant entry) opts)
+                         (constantly (grant-error "invalid_grant"
+                                                  "The refresh token was used before, so its grant is revoked")))
+
+             code
+             (grant-error code reason)
+
+             :else
+             (async/then ((:take! tokens) k)
+                         (fn [taken]
+                           (if taken
+                             (rotate! k taken (indieauth/scopes scope) opts)
+                             (grant-error "invalid_grant" "The refresh token is unknown, or revoked")))))))))))
+
+;; RFC 7009, section 2.1; IndieAuth 7
+(defn- revoke!
+  "Revoke the `token` by the :tokens store of `opts`: an access token
+  alone, or a refresh token with its grant and every token of the grant.
+  Another text does nothing."
+  [token {:keys [tokens] :as opts}]
+  (let [k (hash-key (str token))]
+    (async/then ((:get tokens) k)
+                (fn [entry]
+                  (case (:type entry)
+                    :access  ((:delete! tokens) k)
+                    :refresh (revoke-grant! (:grant entry) opts)
+                    nil)))))
 
 (defn- error-response
   "The Ring response of an OAuth 2.0 `error`, a map of the :code and the
@@ -659,20 +818,81 @@
   (cond-> (ring/json-response 200 x)
     cors? ring/with-cors))
 
-(defn- redemption-response
-  "The Ring response to the POST `request` that redeems a code at the
-  `endpoint`, :token or :authorization, by `opts`."
-  [request endpoint {:keys [max-form-bytes] :as opts}]
+(defn- answered
+  "The Ring response of the `answer` of an endpoint, or of its :error, by
+  `opts`."
+  [{:keys [error] :as answer} opts]
+  (if error
+    (error-response error opts)
+    (json-answer answer opts)))
+
+(defn- form-response
+  "The Ring response to the POST `request` of a form, which `f`, a function
+  of its single-valued fields, answers, by the :max-form-bytes of `opts`."
+  [request f {:keys [max-form-bytes] :as opts}]
   (if-let [pairs (ring/form-fields request max-form-bytes)]
-    (async/then (redeem! (ring/single-values pairs) endpoint opts)
-                (fn [{:keys [error entry]}]
-                  (cond
-                    error                     (error-response error opts)
-                    (= :authorization endpoint) (json-answer (profile-answer entry) opts)
-                    :else                     (async/then (issue-token! entry opts)
-                                                          #(json-answer % opts)))))
+    (let [fields (ring/single-values pairs)]
+      (if-let [repeated (repeated-field fields)]
+        (error-response {:code "invalid_request" :reason (str repeated " is repeated")} opts)
+        (f fields)))
     (assoc (error-response {:code "invalid_request" :reason "The form is too large"} opts)
            :status 413)))
+
+;; IndieAuth 5.3.2
+(defn- profile-response
+  "The Ring response of the authorization endpoint to the redemption of a
+  code with the single-valued `fields`, by `opts`. The redemptions of older
+  clients have no grant_type."
+  [fields opts]
+  (if (contains? #{nil "authorization_code"} (get fields "grant_type"))
+    (async/then (redeem-code! fields opts)
+                (fn [{:keys [error key entry] :as redeemed}]
+                  (if error
+                    (error-response error opts)
+                    (async/then (used! key entry nil opts)
+                                (fn [_] (json-answer (profile-answer entry) opts))))))
+    (error-response {:code "unsupported_grant_type" :reason "grant_type must be authorization_code"}
+                    opts)))
+
+(defn- revoked-response
+  "The Ring response to the revocation of the `token`, by `opts`: 200
+  whether it was known or not, as RFC 7009, section 2.2, says."
+  [token {:keys [cors?] :as opts}]
+  (if (and (string? token) (seq token))
+    (async/then (revoke! token opts)
+                (fn [_] (cond-> (ring/text-response 200 "")
+                          cors? ring/with-cors)))
+    (error-response {:code "invalid_request" :reason "token is missing"} opts)))
+
+;; IndieAuth 5.3.3, 5.5.1 and 7
+(defn- token-response
+  "The Ring response of the token endpoint to a POST of the single-valued
+  `fields`, by `opts`. An older client revokes a token here with
+  action=revoke, by :legacy-revocation?."
+  [fields {:keys [refresh-seconds legacy-revocation?] :as opts}]
+  (let [{:strs [grant_type action token]} fields]
+    (cond
+      (and legacy-revocation? (= "revoke" action))
+      (revoked-response token opts)
+
+      (nil? grant_type)
+      (error-response {:code "invalid_request" :reason "grant_type is missing"} opts)
+
+      (= "authorization_code" grant_type)
+      (async/then (redeem-code! fields opts)
+                  (fn [{:keys [error] :as redeemed}]
+                    (if error
+                      (error-response error opts)
+                      (async/then (code-answer! redeemed opts) #(answered % opts)))))
+
+      (and refresh-seconds (= "refresh_token" grant_type))
+      (async/then (refresh! fields opts) #(answered % opts))
+
+      :else
+      (error-response {:code   "unsupported_grant_type"
+                       :reason (str "grant_type must be authorization_code"
+                                    (when refresh-seconds " or refresh_token"))}
+                      opts))))
 
 ;;; the endpoints
 
@@ -730,11 +950,15 @@
 
   - :issuer, the issuer identifier, an https URL that is a prefix of the
     URL of the metadata, as section 3.1 says
-  - :authorization-endpoint and :token-endpoint, their URLs
+  - :authorization-endpoint and :token-endpoint, their URLs, and
+    :revocation-endpoint, :introspection-endpoint and :userinfo-endpoint,
+    for those that you serve
   - :secret, a text of 32 bytes or more, e.g. a token, that signs the
     requests and consents of request-token and consent
-  - :codes and :tokens, the stores of codes and of access tokens, e.g.
+  - :codes and :tokens, the stores of codes and of tokens, e.g.
     memory-store
+  - :resource-tokens, the texts with which resource servers ask the
+    introspection endpoint, which can be hidden texts
   - :authorize and :error-page, as above"
   [opts]
   (let [{:keys [authorize] :as opts} (options opts)]
@@ -745,7 +969,7 @@
        (case request-method
          :get     (async/then (authorization-page request (assoc opts :authorize authorize))
                               page)
-         :post    (redemption-response request :authorization opts)
+         :post    (form-response request #(profile-response % opts) opts)
          :options (ring/with-cors (ring/text-response 204 ""))
          (ring/not-allowed ["GET" "POST" "OPTIONS"]))))))
 
@@ -757,10 +981,12 @@
   The :metadata-url of `opts` is the URL where you serve it, the
   well-known URL of RFC 8414 by default. The issuer must be a prefix of
   it, as section 3.1 says, or it throws. The :service-documentation of
-  `opts`, a URL, is listed too when it's given."
+  `opts`, a URL, is listed too when it's given, and so are the endpoints
+  that `opts` name."
   [opts]
   (let [{:keys [issuer authorization-endpoint token-endpoint metadata-url
-                scopes-supported service-documentation]}
+                revocation-endpoint introspection-endpoint userinfo-endpoint
+                refresh-seconds scopes-supported service-documentation]}
         (options opts)
         metadata-url (or metadata-url (indieauth/well-known-url issuer))]
     (when-not (indieauth/issuer-of? issuer metadata-url)
@@ -770,11 +996,17 @@
              :authorization_endpoint                         authorization-endpoint
              :scopes_supported                               (vec scopes-supported)
              :response_types_supported                       ["code"]
-             :grant_types_supported                          ["authorization_code"]
+             :grant_types_supported                          (cond-> ["authorization_code"]
+                                                               refresh-seconds (conj "refresh_token"))
              :code_challenge_methods_supported               ["S256"]
              :authorization_response_iss_parameter_supported true}
-      token-endpoint        (assoc :token_endpoint token-endpoint)
-      service-documentation (assoc :service_documentation service-documentation))))
+      token-endpoint         (assoc :token_endpoint token-endpoint)
+      ;; IndieAuth 4.1.1: no client authentication for revocation
+      revocation-endpoint    (assoc :revocation_endpoint revocation-endpoint
+                                    :revocation_endpoint_auth_methods_supported ["none"])
+      introspection-endpoint (assoc :introspection_endpoint introspection-endpoint)
+      userinfo-endpoint      (assoc :userinfo_endpoint userinfo-endpoint)
+      service-documentation  (assoc :service_documentation service-documentation))))
 
 (defn metadata-handler
   "A Ring handler that serves the metadata document of the server of the
@@ -864,15 +1096,22 @@
 
 ;;; resource servers
 
+;; RFC 6750, section 2.1
+(defn- header-token
+  "The bearer token of the Authorization header of the Ring `request`, or
+  nil."
+  [request]
+  (some->> (ring/header request "authorization")
+           (re-matches #"(?i)\s*Bearer\s+(\S+)\s*")
+           second))
+
 ;; RFC 6750, sections 2.1 and 2.2
 (defn bearer-token
   "The access token of the Ring `request`: that of its Authorization
   header, or else the access_token of its :form-params, as a Micropub
   client can send it. Nil when it has none."
   [request]
-  (or (some->> (ring/header request "authorization")
-               (re-matches #"(?i)\s*Bearer\s+(\S+)\s*")
-               second)
+  (or (header-token request)
       (let [form (:form-params request)
             v    (get form "access_token" (get form :access_token))]
         (when (and (string? v) (seq v))
@@ -881,16 +1120,85 @@
 ;; IndieAuth 6 and 8
 (defn token-info!
   "What the :tokens store of `opts` keeps of the access `token`: a map of
-  the :me, :client-id, :scope, :issued-at and :expires, or nil when the
-  token is unknown, revoked or expired. In ClojureScript, it gives a
-  promise."
+  the :me, :client-id, :scope, :issued-at and :expires, and the id of its
+  :grant, or nil when the token is unknown, revoked or expired. A refresh
+  token is no access token. In ClojureScript, it gives a promise."
   [token opts]
   (let [{:keys [tokens now-fn]} (merge default-options opts)]
     (async/then (when (and (string? token) (seq token))
                   ((:get tokens) (hash-key token)))
                 (fn [info]
-                  (when (and info (not (expired? info (now-fn))))
-                    info)))))
+                  (when (and (= :access (:type info))
+                             (not (expired? info (now-fn))))
+                    (dissoc info :type))))))
+
+(defn- instant
+  "The instant of the number of `seconds` since 1970, or nil."
+  [seconds]
+  (when seconds
+    #?(:clj  (java.util.Date. (long (* 1000 seconds)))
+       :cljs (js/Date. (* 1000 seconds)))))
+
+(defn- epoch-seconds
+  "The number of seconds since 1970 of the instant `at`."
+  [at]
+  (quot (inst-ms at) 1000))
+
+(defn- seconds-of
+  "The number `x`, or the number that the text `x` writes, as the example
+  of section 6.2 writes them, or nil."
+  [x]
+  (cond
+    (int? x)    x
+    (string? x) (parse-long x)))
+
+;; IndieAuth 6.2; RFC 7662, section 2.2
+(defn- introspected
+  "The token information of the answer `m` of an introspection endpoint,
+  or nil for a token that isn't active, or an answer without a me."
+  [{:keys [active me client_id scope exp iat] :as m}]
+  (when (and (contains? #{true "true"} active) (string? me))
+    (cond-> {:me me :client-id client_id :scope scope}
+      (seconds-of iat) (assoc :issued-at (instant (seconds-of iat)))
+      (seconds-of exp) (assoc :expires (instant (seconds-of exp))))))
+
+;; IndieAuth 6.1; RFC 7662, section 2.1
+(defn introspect!
+  "Ask the :introspection-endpoint of `opts` about the access `token`, with
+  the :resource-token of `opts`, and give what it says as token-info!
+  does, nil for a token that isn't active, or a map of the :error when it
+  can't be asked. In ClojureScript, it gives a promise.
+
+  A resource server checks the tokens of a server in another process this
+  way. The resource token can be a hidden text, and the `opts` are also
+  those of http/send!, and :send."
+  [token {:keys [introspection-endpoint resource-token] :as opts}]
+  (let [{:keys [send max-json-bytes] :as opts} (merge default-options opts)
+        request {:method  :post
+                 :url     introspection-endpoint
+                 :headers {"Content-Type"  "application/x-www-form-urlencoded"
+                           "Accept"        "application/json"
+                           "Authorization" (http/authorization {:token resource-token})}
+                 :body    (secret/hide (url/query-string [["token" token]]))}]
+    (async/then (http/try-send! send request (assoc opts
+                                                    :max-bytes max-json-bytes
+                                                    :max-redirects 0))
+                (fn [{:keys [value error]}]
+                  (let [m (some-> value :body json/read-object)]
+                    (cond
+                      error
+                      {:error (http/failure error)}
+
+                      (not (<= 200 (:status value) 299))
+                      {:error {:reason (str "The introspection endpoint answered "
+                                            (:status value))
+                               :status (:status value)}}
+
+                      (nil? m)
+                      {:error {:reason "The introspection endpoint's answer isn't JSON"}}
+
+                      :else
+                      (introspected m)))))))
 
 ;; IndieAuth 8.1; RFC 6750, section 3.1
 (defn access-problem
@@ -912,52 +1220,165 @@
 ;; RFC 6750, section 3
 (defn problem-response
   "The Ring response of the `problem` of access-problem, with the
-  WWW-Authenticate header of a bearer token. A problem without a :code is
-  that of a request without a token, whose answer says no more, as
-  section 8.1 has it."
+  WWW-Authenticate header of a bearer token for a status of 401 or 403. A
+  problem without a :code is that of a request without a token, whose
+  answer says no more, as section 8.1 has it."
   [{:keys [status code reason scope] :as problem}]
   (let [challenge (str "Bearer"
                        (when code (str " error=\"" code "\""))
                        (when scope (str ", scope=\"" scope "\"")))]
-    (-> (if code
-          (ring/json-response status {:error code :error_description reason})
-          (ring/text-response status ""))
-        (assoc-in [:headers "WWW-Authenticate"] challenge))))
+    (cond-> (if code
+              (ring/json-response status {:error code :error_description reason})
+              (ring/text-response status ""))
+      (#{401 403} status) (assoc-in [:headers "WWW-Authenticate"] challenge))))
+
+(defn- refusal
+  "The map of the :error `problem` and its Ring :response."
+  [problem]
+  {:error problem :response (problem-response problem)})
 
 (defn access!
-  "What the :tokens store of `opts` keeps of the access token of the Ring
-  `request`, if it grants one of the `scopes`, or any scope when they're
-  empty, as token-info! gives it. Else a map of the :error, as
-  access-problem gives it, and the Ring :response to answer with. In
-  ClojureScript, it gives a promise.
+  "What the server keeps of the access token of the Ring `request`, if it
+  grants one of the `scopes`, or any scope when they're empty, as
+  token-info! gives it. Else a map of the :error, as access-problem gives
+  it, and the Ring :response to answer with. In ClojureScript, it gives a
+  promise.
 
-  A resource server in the same process as the token endpoint checks a
-  token this way, e.g. a Micropub endpoint. Whether the token's :me may
-  use the resource is yours to say."
-  [request scopes opts]
+  A resource server in the same process as the server, e.g. a Micropub
+  endpoint, gives the :tokens store in `opts`. One in another process
+  gives the :introspection-endpoint and the :resource-token of
+  introspect! instead, and a token that can't be checked gives the
+  status 503. Whether the token's :me may use the resource is yours to
+  say."
+  [request scopes {:keys [tokens] :as opts}]
   (if-let [token (bearer-token request)]
-    (async/then (token-info! token opts)
+    (async/then (if tokens
+                  (token-info! token opts)
+                  (introspect! token opts))
                 (fn [info]
-                  (if-let [problem (access-problem info scopes)]
-                    {:error problem :response (problem-response problem)}
-                    info)))
-    (let [problem {:status 401 :reason "The request has no access token"}]
-      (async/then nil (constantly {:error    problem
-                                   :response (problem-response problem)})))))
+                  (if (:error info)
+                    (refusal {:status 503 :reason "The access token couldn't be checked"})
+                    (if-let [problem (access-problem info scopes)]
+                      (refusal problem)
+                      info))))
+    (async/then nil (constantly (refusal {:status 401
+                                          :reason "The request has no access token"})))))
 
 (defn token-handler
   "A Ring handler for the token endpoint, by the `opts` of handler.
 
-  A POST redeems a code for an access token, whose hash goes to the :put!
-  of the :tokens store. The JSON of the answer has :access_token,
+  A POST redeems a code for an access token, or a refresh token for a new
+  one, as section 5.5 says. The JSON of the answer has :access_token,
   :token_type Bearer, :scope and :me, :profile when the user granted it,
-  and :expires_in with :token-seconds. A code without a scope gives the
-  :me alone, as section 5.3.3 says. No cache keeps an answer."
+  :expires_in by :token-seconds, and :refresh_token by :refresh-seconds. A
+  code without a scope gives the :me alone, as section 5.3.3 says, and no
+  cache keeps an answer.
+
+  A refresh token works once, and its answer has a new one. One used
+  again revokes the grant and all its tokens, as a code used again does.
+  An older client can revoke a token here with action=revoke, by
+  :legacy-revocation?."
   [opts]
   (let [opts (options opts)]
     (ring/handler
      (fn [{:keys [request-method] :as request}]
        (case request-method
-         :post    (redemption-response request :token opts)
+         :post    (form-response request #(token-response % opts) opts)
          :options (ring/with-cors (ring/text-response 204 ""))
          (ring/not-allowed ["POST" "OPTIONS"]))))))
+
+;; RFC 7009; IndieAuth 7
+(defn revocation-handler
+  "A Ring handler for the revocation endpoint, by the `opts` of handler.
+
+  A POST revokes the token of its form: an access token alone, or a
+  refresh token with its grant, and so with every token of the grant. It
+  answers 200 whether it knew the token or not, as RFC 7009 says, and takes
+  no client authentication, as section 4.1.1 has it."
+  [opts]
+  (let [opts (options opts)]
+    (ring/handler
+     (fn [{:keys [request-method] :as request}]
+       (case request-method
+         :post    (form-response request #(revoked-response (get % "token") opts) opts)
+         :options (ring/with-cors (ring/text-response 204 ""))
+         (ring/not-allowed ["POST" "OPTIONS"]))))))
+
+(defn- resource-server?
+  "Whether the Ring `request` has a bearer token among the
+  :resource-tokens of `opts`, whose hashes are compared in a time that
+  doesn't tell where they differ."
+  [request {:keys [resource-tokens] :as opts}]
+  (let [given (header-token request)]
+    (boolean
+     (and given
+          (some #(bytes/same? (bytes/encode (hash-key given))
+                              (bytes/encode (hash-key (str (secret/reveal %)))))
+                resource-tokens)))))
+
+;; IndieAuth 6.2; RFC 7662, section 2.2
+(defn- introspection
+  "The answer of the introspection endpoint for the token information
+  `info`."
+  [{:keys [me client-id scope issued-at expires] :as info}]
+  (cond-> {:active    true
+           :me        me
+           :client_id client-id
+           :scope     scope
+           :iat       (epoch-seconds issued-at)}
+    expires (assoc :exp (epoch-seconds expires))))
+
+;; IndieAuth 6; RFC 7662
+(defn introspection-handler
+  "A Ring handler for the introspection endpoint, by the `opts` of handler.
+
+  A POST asks about the access token of its form, and the JSON of the
+  answer has :active true, :me, :client_id, :scope, :iat and :exp, or
+  :active false alone. A resource server asks with one of the
+  :resource-tokens of `opts` as its bearer token, since section 6.1 says
+  that the endpoint needs authorization. A request without it gets 401,
+  which tells nothing about the token."
+  [opts]
+  (let [opts (options opts)]
+    (ring/handler
+     (fn [{:keys [request-method] :as request}]
+       (cond
+         (not= :post request-method)
+         (ring/not-allowed ["POST"])
+
+         (not (resource-server? request opts))
+         (problem-response {:status 401
+                            :code   "invalid_token"
+                            :reason "The request needs the token of a resource server"})
+
+         :else
+         (form-response request
+                        (fn [{:strs [token]}]
+                          (async/then (token-info! token opts)
+                                      #(ring/json-response 200 (if %
+                                                                 (introspection %)
+                                                                 {:active false}))))
+                        opts))))))
+
+;; IndieAuth 9
+(defn userinfo-handler
+  "A Ring handler for the userinfo endpoint, by the `opts` of handler.
+
+  A GET or a POST with an access token that has the profile scope gives the
+  JSON of the user's profile information, as the token response had it. A
+  request without a token gets 401, and one whose token doesn't have the
+  scope 403, as section 8.1 has it."
+  [opts]
+  (let [{:keys [tokens cors?] :as opts} (options opts)]
+    (ring/handler
+     (fn [{:keys [request-method] :as request}]
+       (case request-method
+         (:get :post) (async/then
+                       (access! request ["profile"] opts)
+                       (fn [{:keys [error response grant]}]
+                         (if error
+                           (cond-> response cors? ring/with-cors)
+                           (async/then ((:get tokens) (grant-key grant))
+                                       #(json-answer (or (:profile %) {}) opts)))))
+         :options     (ring/with-cors (ring/text-response 204 ""))
+         (ring/not-allowed ["GET" "POST" "OPTIONS"]))))))
