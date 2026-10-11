@@ -109,12 +109,12 @@ Serve your client metadata at the client identifier with
 `client-metadata-handler`, so that servers can show your app's name and
 logo, and list the redirect URLs on other hosts there.
 
-If you'd rather keep nothing, give `authorization-request` a `:secret`.
-The state then carries the session, signed, and `state-session` gets it
-back from the state. Such a state isn't tied to the browser that started
-the sign-in, so someone could send another person's browser to finish a
-sign-in as themselves. Tie it to the browser with a cookie if that
-matters to you.
+If you'd rather keep nothing on the server, give `authorization-request`
+a `:secret`. The state then carries the session, signed, and the
+session's `:nonce` goes in a cookie, e.g. `HttpOnly` and `SameSite=Lax`.
+At the redirect URL, `state-session` gets the session back from the state
+and the cookie's nonce, so that only the browser that started a sign-in
+can finish it.
 
 ### Run a server
 

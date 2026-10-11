@@ -55,37 +55,65 @@
   [url]
   (first (str/split url #"[?#]" 2)))
 
+(defn- host-of
+  "The host and port of the `url`."
+  [url]
+  (:authority (indieauth/url-parts url)))
+
+(defn- with-cookies
+  "The `cookies`, a map of names to values, with those that the Set-Cookie
+  value `v`, a text or texts, sets."
+  [cookies v]
+  (into (or cookies {})
+        (for [s     (if (sequential? v) v [v])
+              :let  [[_ k value] (re-find #"^\s*([^=;\s]+)=([^;]*)" (str s))]
+              :when k]
+          [k value])))
+
+(defn- cookie-header
+  "The Cookie header of the `cookies`, a map of names to values, or nil."
+  [cookies]
+  (some->> (seq cookies)
+           (map (fn [[k v]] (str k "=" v)))
+           (str/join "; ")))
+
 (defn network
   "A function that sends a request map as http/send! does, to the Ring
   handler that `routes`, a map of URLs without their query, has for its
-  URL, and else answers 404. It follows redirects as http/send! does, and
-  conj's each request to the atom `log`, as the Ring request with its
-  :url."
+  URL, and else answers 404. It follows redirects as http/send! does,
+  keeps the cookies of each host as a browser does, and conj's each
+  request to the atom `log`, as the Ring request with its :url."
   ([routes]
    (network routes (atom [])))
   ([routes log]
-   (fn send [request]
-     (let [request (http/revealed request)
-           limit   (:max-redirects request 5)]
-       (letfn [(step [request chain]
-                 (let [ring (assoc (ring-request request) :url (:url request))
-                       h    (get routes (without-query (:url request))
-                                 (constantly {:status 404 :headers {} :body ""}))]
-                   (swap! log conj ring)
-                   (async/then
-                    (h ring)
-                    (fn [response]
-                      (let [{:keys [status headers] :as r} (fetched (:url request) response)
-                            location                       (get headers "location")]
-                        (if (and (#{301 302 303 307 308} status)
-                                 location
-                                 (< (count chain) limit))
-                          (step (cond-> (assoc request :url (url/absolute-url (:url request) location))
-                                  (= 303 status) (assoc :method :get :body nil))
-                                (conj chain [status (:url request) headers]))
-                          (cond-> r
-                            (seq chain) (assoc :redirects chain))))))))]
-         (step request []))))))
+   (let [jar (atom {})]
+     (fn send [request]
+       (let [request (http/revealed request)
+             limit   (:max-redirects request 5)]
+         (letfn [(step [request chain]
+                   (let [host   (host-of (:url request))
+                         cookie (cookie-header (get @jar host))
+                         ring   (cond-> (assoc (ring-request request) :url (:url request))
+                                  cookie (assoc-in [:headers "cookie"] cookie))
+                         h      (get routes (without-query (:url request))
+                                     (constantly {:status 404 :headers {} :body ""}))]
+                     (swap! log conj ring)
+                     (async/then
+                      (h ring)
+                      (fn [response]
+                        (let [{:keys [status headers] :as r} (fetched (:url request) response)
+                              location                       (get headers "location")]
+                          (when-let [v (get headers "set-cookie")]
+                            (swap! jar update host with-cookies v))
+                          (if (and (#{301 302 303 307 308} status)
+                                   location
+                                   (< (count chain) limit))
+                            (step (cond-> (assoc request :url (url/absolute-url (:url request) location))
+                                    (= 303 status) (assoc :method :get :body nil))
+                                  (conj chain [status (:url request) headers]))
+                            (cond-> r
+                              (seq chain) (assoc :redirects chain))))))))]
+           (step request [])))))))
 
 (defn page
   "A Ring handler that answers with the HTML `s`, and the Link header

@@ -103,14 +103,19 @@
                        (let [{:keys [url session]} (indieauth/authorization-request discovery client)]
                          (when-not secret
                            (swap! sessions assoc (:state session) session))
-                         {:status 302 :headers {"Location" url} :body ""})))))
+                         {:status  302
+                          :headers (cond-> {"Location" url}
+                                     secret (assoc "Set-Cookie" (str "nonce=" (:nonce session)
+                                                                     "; Path=/callback; HttpOnly; Secure; SameSite=Lax")))
+                          :body    ""})))))
 
      "https://app.example/callback"
-     (fn [{:keys [query-string]}]
+     (fn [{:keys [query-string headers]}]
        (let [params  (url/query-params query-string)
              state   (get params "state")
+             nonce   (second (re-find #"(?:^|;\s*)nonce=([^;]*)" (str (get headers "cookie"))))
              session (if secret
-                       (indieauth/state-session secret state)
+                       (indieauth/state-session secret state nonce)
                        (get @sessions state))]
          (swap! sessions dissoc state)
          (async/then (indieauth/redeem! session params opts)

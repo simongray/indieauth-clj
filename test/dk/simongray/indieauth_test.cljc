@@ -318,14 +318,23 @@
                                                                                 :scope "create"
                                                                                 :secret secret-text
                                                                                 :now-fn (constantly noon)))
-        state                 (get (t/query url) "state")]
+        state                 (get (t/query url) "state")
+        nonce                 (:nonce session)
+        later                 {:now-fn (constantly #inst "2026-10-11T12:09:00Z")}]
     (testing "the state carries the session, and the verifier comes from the state"
-      (is (= session (indieauth/state-session secret-text state {:now-fn (constantly #inst "2026-10-11T12:09:00Z")})))
+      (is (= session (indieauth/state-session secret-text state nonce later)))
       (is (= (indieauth/code-challenge (:code-verifier session)) (get (t/query url) "code_challenge")))
       (is (not (str/includes? url (:code-verifier session))) "the verifier isn't in the URL"))
+    (testing "RFC 9700, section 4.7.1: only for the browser with the nonce"
+      (is (string? nonce))
+      (is (not (str/includes? url nonce)) "the nonce isn't in the URL")
+      (is (nil? (indieauth/state-session secret-text state nil later)))
+      (is (nil? (indieauth/state-session secret-text state (indieauth/token) later))))
     (testing "but not after :session-seconds, nor with another secret"
-      (is (nil? (indieauth/state-session secret-text state {:now-fn (constantly #inst "2026-10-11T12:11:00Z")})))
-      (is (nil? (indieauth/state-session (str secret-text "!") state {:now-fn (constantly noon)}))))))
+      (is (nil? (indieauth/state-session secret-text state nonce {:now-fn (constantly #inst "2026-10-11T12:11:00Z")})))
+      (is (nil? (indieauth/state-session (str secret-text "!") state nonce {:now-fn (constantly noon)}))))
+    (testing "a session without a secret has no nonce"
+      (is (nil? (:nonce (:session (indieauth/authorization-request discovery client))))))))
 
 (def session
   (assoc discovery

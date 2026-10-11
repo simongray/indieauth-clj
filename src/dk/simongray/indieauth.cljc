@@ -445,19 +445,33 @@
   "The kind of a signed state that carries a session."
   ::session)
 
-;; IndieAuth 5.2.1: the state can hold the session
+(defn- fingerprint
+  "The SHA-256 of the text `s` in the URL-safe letters of base64."
+  [s]
+  (bytes/base64url (bytes/sha256 (bytes/encode s))))
+
+;; IndieAuth 5.2.1: the state can hold the session; RFC 9700, section
+;; 4.7.1: a state that is bound to the browser
 (defn state-session
   "The session that the signed `state` carries, which authorization-request
-  gave with the `secret`, or nil when it isn't one, or is older than the
-  :session-seconds of `opts`."
-  ([secret state]
-   (state-session secret state {}))
-  ([secret state opts]
-   (let [{:keys [session-seconds now-fn]} (merge default-options opts)]
-     (some-> (signed/unsign secret session-kind state (now-fn) session-seconds)
-             (assoc :state         state
-                    :code-verifier (signed/derive-text secret "code_verifier"
-                                                       state))))))
+  gave with the `secret`, if the `nonce` is the session's, or nil. It's nil
+  too when the state is older than the :session-seconds of `opts`.
+
+  The nonce comes from the browser that came back, e.g. from a cookie,
+  so that only the browser that started the sign-in can finish it."
+  ([secret state nonce]
+   (state-session secret state nonce {}))
+  ([secret state nonce opts]
+   (let [{:keys [session-seconds now-fn]} (merge default-options opts)
+         m (signed/unsign secret session-kind state (now-fn) session-seconds)]
+     (when (and m
+                (string? nonce)
+                (bytes/same? (bytes/encode (fingerprint nonce))
+                             (bytes/encode (str (:nonce m)))))
+       (assoc m
+              :nonce         nonce
+              :state         state
+              :code-verifier (signed/derive-text secret "code_verifier" state))))))
 
 (defn- request-problem
   "What's wrong with the options of an authorization request: its
@@ -485,16 +499,17 @@
   - :client-id, the client identifier
   - :redirect-uri, the URL that the browser comes back to
   - :scope, the scopes to ask for, as a text or a collection. Without one,
-    the server only says who the user is.
+    the answer has the user's profile URL alone.
   - :secret, a text of 32 bytes or more, e.g. a token, to sign the session
     into the state, so that state-session gets it back from the state
   - :now-fn, as default-options has it
 
   Keep the session where the browser's next request finds it, e.g. in a
-  session store or a signed cookie, since it holds the PKCE code verifier
-  and the state that ties the answer to this browser. A scope that asks
-  for an access token needs a token endpoint, and a server without one
-  gives a map of the :error."
+  session store, since it holds the PKCE code verifier and the state that
+  ties the answer to this browser. With a :secret, keep its :nonce in a
+  cookie instead, and give it to state-session with the state. A scope
+  that asks for an access token needs a token endpoint, and a server
+  without one gives a map of the :error."
   [{:keys [me authorization-endpoint token-endpoint] :as discovery}
    {:keys [client-id redirect-uri scope secret] :as opts}]
   (let [{:keys [now-fn]} (merge default-options opts)
@@ -513,12 +528,16 @@
                             {:client-id    client-id
                              :redirect-uri redirect-uri
                              :scope        (scope-text scopes)})
+            nonce    (when secret (token))
             state    (if secret
-                       (signed/sign secret session-kind session (now-fn))
+                       (signed/sign secret session-kind
+                                    (assoc session :nonce (fingerprint nonce))
+                                    (now-fn))
                        (token))
             verifier (if secret
                        (signed/derive-text secret "code_verifier" state)
-                       (code-verifier))]
+                       (code-verifier))
+            session  (cond-> session nonce (assoc :nonce nonce))]
         {:url     (url/with-query authorization-endpoint
                     [["response_type" "code"]
                      ["client_id" client-id]
