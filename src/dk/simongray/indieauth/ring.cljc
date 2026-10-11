@@ -39,9 +39,10 @@
           :let  [[k v] (str/split part #"=" 2)]]
       [(decode k) (decode (or v ""))])))
 
-(defn- param-fields
-  "The fields of the Ring `params` map, whose values are texts or vectors
-  of them, as pairs of a name and a value."
+(defn param-fields
+  "The fields of the Ring `params` map, whose keys are texts or keywords
+  and whose values are texts or vectors of them, as pairs of a name and a
+  value."
   [params]
   (for [[k v] params
         v     (if (sequential? v) v [v])]
