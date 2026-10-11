@@ -5,7 +5,7 @@
   localhost."
   (:require [clojure.string :as str]
             #?(:cljs [clojure.test :refer [is async]])
-            [dk.simongray.indieauth :as indieauth]
+            [dk.simongray.indieauth.identifier :as identifier]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
@@ -31,7 +31,7 @@
 (defn ring-request
   "The Ring request of the wary-fetch `request` map."
   [{:keys [method url headers body]}]
-  (let [{:keys [scheme host port path query]} (indieauth/url-parts url)]
+  (let [{:keys [scheme host port path query]} (identifier/url-parts url)]
     {:request-method (or method :get)
      :scheme         (keyword scheme)
      :server-name    host
@@ -57,7 +57,7 @@
 (defn- host-of
   "The host and port of the `url`."
   [url]
-  (:authority (indieauth/url-parts url)))
+  (:authority (identifier/url-parts url)))
 
 (defn- with-cookies
   "The `cookies`, a map of names to values, with those that the Set-Cookie
@@ -227,9 +227,9 @@
      the URLs of the sites of the test."
      [routes f]
      (let [local (into {} (for [[u h] routes
-                                :let  [{:keys [authority path]} (indieauth/url-parts u)]]
+                                :let  [{:keys [authority path]} (identifier/url-parts u)]]
                             [(str "/" authority (if (empty? path) "/" path)) h]))]
        (with-server local
          (fn [base]
            (f (into {} (for [u (keys routes)]
-                         [u (forwarder base (:authority (indieauth/url-parts u)))]))))))))
+                         [u (forwarder base (:authority (identifier/url-parts u)))]))))))))

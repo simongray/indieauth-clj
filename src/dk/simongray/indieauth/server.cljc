@@ -18,6 +18,7 @@
             [dk.simongray.html-pieces :as html]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.identifier :as identifier]
             [dk.simongray.indieauth.instant :as instant]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.links :as links]
@@ -146,14 +147,6 @@
 
 ;;; client information
 
-(defn- loopback?
-  "Whether the client identifier `client-id` names a loopback host, which
-  section 4.2 says not to fetch."
-  [client-id]
-  (let [host (:host (indieauth/url-parts client-id))]
-    (boolean (or (contains? indieauth/loopback-hosts host)
-                 (re-find #"(?i)(^|\.)localhost\.?$" (str host))))))
-
 (defn- unknown-client
   "The client information of the `client-id` alone."
   [client-id]
@@ -240,7 +233,7 @@
    (client-info! client-id {}))
   ([client-id opts]
    (let [{:keys [max-page-bytes] :as opts} (merge default-options opts)]
-     (if (loopback? client-id)
+     (if (identifier/loopback? client-id)
        (async/then (unknown-client client-id) identity)
        (async/then
         (async/attempt #(http/fetch! client-id (assoc opts
@@ -268,12 +261,12 @@
 (defn- redirect-uri-problem
   "What's wrong with `s` as a redirect URL, or nil."
   [s]
-  (let [{:keys [scheme fragment]} (indieauth/url-parts s)]
+  (let [{:keys [scheme fragment]} (identifier/url-parts s)]
     (cond
-      (nil? scheme)                            "redirect_uri isn't an absolute URL"
-      (some? fragment)                         "redirect_uri has a fragment"
-      (contains? unsafe-schemes scheme)        "redirect_uri has a scheme that isn't allowed"
-      (re-find indieauth/unsafe-characters s)  "redirect_uri has a space or a backslash"
+      (nil? scheme)                             "redirect_uri isn't an absolute URL"
+      (some? fragment)                          "redirect_uri has a fragment"
+      (contains? unsafe-schemes scheme)         "redirect_uri has a scheme that isn't allowed"
+      (re-find identifier/unsafe-characters s)  "redirect_uri has a space or a backslash"
       (and (#{"http" "https"} scheme)
            (not (url/web-url? s)))             "redirect_uri has no host")))
 

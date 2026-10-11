@@ -65,6 +65,13 @@
     (param-fields form-params)
     (some-> (body-bytes body max-bytes) bytes/decode fields)))
 
+(defn param
+  "The value of the parameter `k`, a text, in `params`, a map whose keys
+  are texts or keywords, and the first when it has several."
+  [params k]
+  (let [v (get params k (get params (keyword k)))]
+    (if (sequential? v) (first v) v)))
+
 ;; RFC 6749, section 3.1: a parameter comes once
 (defn single-values
   "The fields `pairs` as a map of each name to its value, and of each name

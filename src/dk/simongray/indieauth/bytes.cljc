@@ -64,6 +64,12 @@
   #?(:clj  (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) b)
      :cljs (base64/encodeByteArray b base64/Alphabet.WEBSAFE_NO_PADDING)))
 
+(defn random-text
+  "`n` random bytes from the platform's secure source, in the URL-safe
+  letters of base64."
+  [n]
+  (base64url (random n)))
+
 (defn unbase64url
   "The bytes of the text `s` in the URL-safe alphabet of base64, without
   padding, or nil when it isn't."
