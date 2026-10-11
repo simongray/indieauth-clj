@@ -103,17 +103,18 @@
   `opts`, as maps of :rels and an absolute :href: those of its Link
   headers first, and then those of the page's link elements.
 
-  Those are in its head, or in all of it by :body-links?. The head alone
-  is read, base element and all, since anyone who writes in the body
-  could add a base element or a link there."
+  Those are in its head, base element and all, since anyone who writes in
+  the body could add a base element or a link there, or in all of it by
+  :body-links?."
   [{:keys [url headers] :as response} page {:keys [body-links?] :as opts}]
   (concat
    (keep (fn [{:keys [rel href]}] (link rel (url/absolute-url url href)))
          (headers/links headers))
    (when page
      (keep (fn [[_ {:keys [rel href]}]] (link rel href))
-           (html/links (if body-links? page (html/head page))
-                       {:base-url url :link-tags #{:link}})))))
+           (html/links page {:base-url  url
+                             :link-tags #{:link}
+                             :body?     (boolean body-links?)})))))
 
 (defn hrefs
   "The hrefs of the `links` with the link type `rel`, in their order, each
