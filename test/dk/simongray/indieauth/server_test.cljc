@@ -630,6 +630,12 @@
 (deftest profiles
   (is (nil? (server/profile {:url "https://user.example/" :body "<p class=h-card><a class=u-url href=https://other.example/>B</a>"}))
       "an h-card of another page")
+  (is (= {:name "Ann" :url "https://social.example/@ann"}
+         (server/profile {:url  "https://user.example/"
+                          :body (str "<link rel=me href=https://social.example/@ann>"
+                                     "<p class=h-card><a class='u-url p-name' href=https://bob.example/>Bob</a>"
+                                     "<p class=h-card><a class='u-url p-name' href=https://social.example/@ann>Ann</a>")}))
+      "the h-card whose url is that of a rel=me link")
   (run
    #(async/then (server/profile! "https://user.example/" {:send (t/network clients)})
                 (fn [p]
