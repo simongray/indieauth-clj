@@ -9,8 +9,8 @@
   through a browser in dk.simongray.indieauth.signed, and the signed state
   of a sign-in, which other protocols can use too, in
   dk.simongray.indieauth.state. The other namespaces are internal and
-  named for what they hold, e.g. identifier for the parts of URLs and
-  grant for the codes and tokens of a server."
+  named for what they hold, e.g. identifier for the rules of identifiers
+  and grant for the codes and tokens of a server."
   (:require [clojure.string :as str]
             [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.fetch :as fetch]
