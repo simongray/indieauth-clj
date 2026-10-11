@@ -7,6 +7,7 @@
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.json :as json]
+            [dk.simongray.indieauth.state :as state]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.secret :as secret]))
@@ -339,6 +340,11 @@
     (testing "but not after :session-seconds, nor with another secret"
       (is (nil? (indieauth/state-session secret-text state nonce {:now-fn (constantly #inst "2026-10-11T12:11:00Z")})))
       (is (nil? (indieauth/state-session (str secret-text "!") state nonce {:now-fn (constantly noon)}))))
+    (testing "the state of another protocol under the same secret, e.g. RelMeAuth's"
+      (let [other (state/fresh secret-text :example/relmeauth {:me "https://user.example/"} noon)]
+        (is (= "https://user.example/" (:me (state/session secret-text :example/relmeauth (:state other) (:nonce other) noon 600))))
+        (is (nil? (indieauth/state-session secret-text (:state other) (:nonce other) later)))
+        (is (nil? (state/session secret-text :example/relmeauth state nonce noon 600)))))
     (testing "a session without a secret has no nonce"
       (is (nil? (:nonce (:session (indieauth/authorization-request discovery client))))))
     (testing ":data, which the session carries, also in a signed state"

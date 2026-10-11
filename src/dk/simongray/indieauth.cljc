@@ -5,10 +5,12 @@
   The code follows the IndieAuth Living Standard of 11 July 2024 at
   https://indieauth.spec.indieweb.org/ and cites its sections. The server
   is in dk.simongray.indieauth.server, the checks of a resource server in
-  dk.simongray.indieauth.resource, and the signed maps that carry a value
-  through a browser in dk.simongray.indieauth.signed. The other
-  namespaces are internal and named for what they hold, e.g. identifier
-  for the parts of URLs and grant for the codes and tokens of a server."
+  dk.simongray.indieauth.resource, the signed maps that carry a value
+  through a browser in dk.simongray.indieauth.signed, and the signed state
+  of a sign-in, which other protocols can use too, in
+  dk.simongray.indieauth.state. The other namespaces are internal and
+  named for what they hold, e.g. identifier for the parts of URLs and
+  grant for the codes and tokens of a server."
   (:require [clojure.string :as str]
             [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.fetch :as fetch]
@@ -374,7 +376,7 @@
                                     :redirect-uri redirect-uri
                                     :scope        (scope-text asked)})
                       (some? data) (assoc :data data))
-            {:keys [state code-verifier] :as fresh} (state/fresh session secret (now-fn))]
+            {:keys [state code-verifier] :as fresh} (state/fresh secret ::session session (now-fn))]
         {:url     (url/with-query authorization-endpoint
                     [["response_type" "code"]
                      ["client_id" client-id]
@@ -399,7 +401,7 @@
    (state-session secret state nonce {}))
   ([secret state nonce opts]
    (let [{:keys [session-seconds now-fn]} (merge default-options opts)]
-     (state/session secret state nonce (now-fn) session-seconds))))
+     (state/session secret ::session state nonce (now-fn) session-seconds))))
 
 ;; IndieAuth 5.2.1; RFC 9207, section 2.4; RFC 6749, section 4.1.2.1
 (defn callback-problem
