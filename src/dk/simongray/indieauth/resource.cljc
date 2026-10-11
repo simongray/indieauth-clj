@@ -7,7 +7,7 @@
   July 2024, https://indieauth.spec.indieweb.org/, and RFC 6750."
   (:require [clojure.string :as str]
             [dk.simongray.indieauth :as indieauth]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.instant :as instant]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.ring :as ring]
@@ -58,7 +58,7 @@
   [token opts]
   (let [{:keys [tokens now-fn]} (merge default-options opts)]
     (async/then (when (and (string? token) (seq token))
-                  ((:get tokens) (bytes/hash-text token)))
+                  ((:get tokens) (digest/text token)))
                 (fn [info]
                   (when (and (= :access (:type info))
                              (not (instant/expired? info (now-fn))))

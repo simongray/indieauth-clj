@@ -4,7 +4,7 @@
   that misbehave. Those at the library's own introspection endpoint are in
   the server's tests."
   (:require [clojure.test :refer [deftest is testing]]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.server :as server]
@@ -45,8 +45,8 @@
         opts   {:tokens tokens :now-fn #(deref clock)}
         ask    #(resource/access! {:headers (if % {"authorization" (str "Bearer " %)} {})}
                                   ["create"] opts)]
-    ((:put! tokens) (bytes/hash-text "the-token") (assoc info :type :access))
-    ((:put! tokens) (bytes/hash-text "a-refresh-token") (assoc info :type :refresh))
+    ((:put! tokens) (digest/text "the-token") (assoc info :type :access))
+    ((:put! tokens) (digest/text "a-refresh-token") (assoc info :type :refresh))
     (run
      #(async/then (ask "the-token")
                   (fn [a]

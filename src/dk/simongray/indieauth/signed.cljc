@@ -10,8 +10,8 @@
   and can be a hidden text of wary-fetch. The map holds EDN values, e.g.
   texts, keywords, numbers and instants."
   (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
-            [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.instant :as instant]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.secret :as secret]))
 
 (defn- key-bytes
@@ -26,7 +26,7 @@
 (defn- signature
   "The signature of the text `s` with the `secret`, as bytes."
   [secret s]
-  (bytes/hmac-sha256 (key-bytes secret) (bytes/encode s)))
+  (bytes/hmac :sha256 (key-bytes secret) (bytes/encode s)))
 
 (defn- edn-text
   "The value `x` as EDN, printed in full."

@@ -7,9 +7,10 @@
   store of tokens keeps it under a key of its own, with the keys of its
   tokens and when each expires."
   (:require [dk.simongray.indieauth :as indieauth]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.instant :as instant]
-            [dk.simongray.wary-fetch.async :as async]))
+            [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.bytes :as bytes]))
 
 (defn- each!
   "Call `f` on each of `xs` in turn, after what the call before gives, a
@@ -82,18 +83,18 @@
   (let [at      (now-fn)
         access  (indieauth/token)
         refresh (when refresh-seconds (indieauth/token))
-        entries (cond-> {(bytes/hash-text access) {:type      :access
-                                                   :grant     id
-                                                   :me        me
-                                                   :client-id client-id
-                                                   :scope     scope
-                                                   :issued-at at
-                                                   :expires   (some->> token-seconds (instant/later at))}}
-                  refresh (assoc (bytes/hash-text refresh) {:type      :refresh
-                                                            :grant     id
-                                                            :client-id client-id
-                                                            :scope     (:scope grant)
-                                                            :expires   (instant/later at refresh-seconds)}))
+        entries (cond-> {(digest/text access) {:type      :access
+                                               :grant     id
+                                               :me        me
+                                               :client-id client-id
+                                               :scope     scope
+                                               :issued-at at
+                                               :expires   (some->> token-seconds (instant/later at))}}
+                  refresh (assoc (digest/text refresh) {:type      :refresh
+                                                        :grant     id
+                                                        :client-id client-id
+                                                        :scope     (:scope grant)
+                                                        :expires   (instant/later at refresh-seconds)}))
         live    (into (update-vals entries :expires)
                       (remove #(some-> (val %) (instant/past? at)))
                       (:tokens grant))]
@@ -142,7 +143,7 @@
   A code used before revokes the grant of its tokens."
   [fields {:keys [codes now-fn] :as opts}]
   (let [{:strs [code client_id redirect_uri]} fields
-        k (bytes/hash-text (str code))]
+        k (digest/text (str code))]
     (if (some empty? [code client_id redirect_uri])
       (async/then (grant-error "invalid_request" "code, client_id and redirect_uri are needed")
                   identity)
@@ -228,7 +229,7 @@
   `fields`, by the :tokens store of `opts`, or the :error."
   [fields {:keys [tokens now-fn] :as opts}]
   (let [{:strs [refresh_token client_id scope]} fields
-        k (bytes/hash-text (str refresh_token))]
+        k (digest/text (str refresh_token))]
     (if (some empty? [refresh_token client_id])
       (async/then (grant-error "invalid_request" "refresh_token and client_id are needed")
                   identity)
@@ -257,7 +258,7 @@
   alone, or a refresh token with its grant and every token of the grant.
   Another text does nothing."
   [token {:keys [tokens] :as opts}]
-  (let [k (bytes/hash-text (str token))]
+  (let [k (digest/text (str token))]
     (async/then ((:get tokens) k)
                 (fn [entry]
                   (case (:type entry)

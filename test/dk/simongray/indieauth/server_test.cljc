@@ -9,12 +9,13 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [dk.simongray.indieauth :as indieauth]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.server :as server]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.url :as url]))
 
 (def verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
@@ -541,7 +542,7 @@
       ((:put! store) "c" {:x 3})
       (is (nil? ((:get store) "a")))))
   (testing "a key is the SHA-256 of a code or a token, not the text"
-    (is (= "LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564" (bytes/hash-text "foo")))))
+    (is (= "LCa0a2j_xo_5m0U8HTBBNBNCLXBkg7-g-YpeiGJm564" (digest/text "foo")))))
 
 (deftest client-information
   (let [opts {:send (t/network clients)}]

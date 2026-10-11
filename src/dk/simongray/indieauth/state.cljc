@@ -6,8 +6,14 @@
   The kind of a state is a keyword of its sign-in protocol, e.g.
   :dk.simongray.indieauth/session, so that under a shared secret the
   state of one protocol never passes for that of another."
-  (:require [dk.simongray.indieauth.bytes :as bytes]
-            [dk.simongray.indieauth.signed :as signed]))
+  (:require [dk.simongray.indieauth.digest :as digest]
+            [dk.simongray.indieauth.signed :as signed]
+            [dk.simongray.wary-fetch.bytes :as bytes]))
+
+(defn- random-text
+  "A text of 32 random bytes in the URL-safe letters of base64."
+  []
+  (bytes/base64url (bytes/random 32)))
 
 (defn- verifier
   "The PKCE code verifier of the signed `state`, which only the `secret`
@@ -27,12 +33,12 @@
   Without a secret, the state is random and carries nothing."
   [secret kind session at]
   (if secret
-    (let [nonce (bytes/random-text 32)
+    (let [nonce (random-text)
           state (signed/sign secret kind
-                             (assoc session :nonce (bytes/hash-text nonce))
+                             (assoc session :nonce (digest/text nonce))
                              at)]
       {:state state :code-verifier (verifier secret state) :nonce nonce})
-    {:state (bytes/random-text 32) :code-verifier (bytes/random-text 32)}))
+    {:state (random-text) :code-verifier (random-text)}))
 
 (defn session
   "The session that the `state` of the `kind` carries, by the `secret`, if
@@ -43,7 +49,7 @@
   (let [m (signed/unsign secret kind state at max-seconds)]
     (when (and m
                (string? nonce)
-               (bytes/same-text? (bytes/hash-text nonce) (:nonce m)))
+               (bytes/same-text? (digest/text nonce) (:nonce m)))
       (assoc m
              :nonce         nonce
              :state         state

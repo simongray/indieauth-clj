@@ -1,29 +1,12 @@
 (ns dk.simongray.indieauth.signed-test
-  "The hashes on both platforms, and the signed maps that make a round trip
-  through a browser."
+  "The signed maps that make a round trip through a browser."
   (:require [clojure.test :refer [deftest is testing]]
-            [dk.simongray.indieauth.bytes :as bytes]
             [dk.simongray.indieauth.signed :as signed]
             [dk.simongray.wary-fetch.secret :as secret]))
 
 (def secret-text "0123456789abcdef0123456789abcdef")
 (def noon #inst "2026-10-11T12:00:00Z")
 (def later #inst "2026-10-11T12:05:00Z")
-
-(deftest hashes
-  (testing "RFC 7636, appendix B: the S256 challenge of a verifier"
-    (is (= "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-           (bytes/base64url (bytes/sha256 (bytes/encode "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"))))))
-  (testing "RFC 4231, test case 2"
-    (is (= "W9zBRr9gdU5qBCQmCJV1x1oAPwidJzmDnexYuWTsOEM"
-           (bytes/base64url (bytes/hmac-sha256 (bytes/encode "Jefe")
-                                               (bytes/encode "what do ya want for nothing?"))))))
-  (is (= 43 (count (bytes/base64url (bytes/random 32)))))
-  (is (= "héllo" (bytes/decode (bytes/unbase64url (bytes/base64url (bytes/encode "héllo"))))))
-  (is (nil? (bytes/unbase64url "a+b/")) "the standard alphabet isn't the URL-safe one")
-  (is (bytes/same? (bytes/encode "abc") (bytes/encode "abc")))
-  (is (not (bytes/same? (bytes/encode "abc") (bytes/encode "abd"))))
-  (is (not (bytes/same? (bytes/encode "abc") (bytes/encode "abcd")))))
 
 (deftest signed-maps
   (let [m {:me "https://user.example.net/" :scope #{"profile"}}

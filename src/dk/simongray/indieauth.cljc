@@ -12,7 +12,7 @@
   named for what they hold, e.g. identifier for the parts of URLs and
   grant for the codes and tokens of a server."
   (:require [clojure.string :as str]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.fetch :as fetch]
             [dk.simongray.indieauth.identifier :as identifier]
             [dk.simongray.indieauth.instant :as instant]
@@ -22,6 +22,7 @@
             [dk.simongray.indieauth.state :as state]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.url :as url]))
 
 ;;; identifiers
@@ -125,7 +126,7 @@
   ([]
    (token 32))
   ([n]
-   (bytes/random-text n)))
+   (bytes/base64url (bytes/random n))))
 
 ;; IndieAuth 5.2; RFC 7636, section 4.1
 (defn code-verifier
@@ -146,7 +147,7 @@
   "The S256 code challenge of the code `verifier`: its SHA-256 in the
   URL-safe letters of base64."
   [verifier]
-  (bytes/hash-text verifier))
+  (digest/text verifier))
 
 ;; RFC 6749, section 3.3
 (defn scopes

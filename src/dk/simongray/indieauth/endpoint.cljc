@@ -3,12 +3,13 @@
   resource servers post, as Ring responses: the redemption of a code, the
   token endpoint's grants, revocation and introspection."
   (:require [dk.simongray.indieauth.authorization :as authorization]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.grant :as grant]
             [dk.simongray.indieauth.instant :as instant]
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.secret :as secret]))
 
 (defn error-response
@@ -114,9 +115,9 @@
   among the `resource-tokens`, by their hashes, compared in a time that
   doesn't tell where they differ."
   [resource-tokens]
-  (let [hashes (mapv #(bytes/hash-text (str (secret/reveal %))) resource-tokens)]
+  (let [hashes (mapv #(digest/text (str (secret/reveal %))) resource-tokens)]
     (fn [request]
-      (when-let [given (some-> (resource/header-token request) bytes/hash-text)]
+      (when-let [given (some-> (resource/header-token request) digest/text)]
         (boolean (some #(bytes/same-text? given %) hashes))))))
 
 ;; IndieAuth 6.2; RFC 7662, section 2.2

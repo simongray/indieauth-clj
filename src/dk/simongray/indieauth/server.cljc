@@ -12,7 +12,7 @@
   (:require [clojure.string :as str]
             [dk.simongray.indieauth :as indieauth]
             [dk.simongray.indieauth.authorization :as authorization]
-            [dk.simongray.indieauth.bytes :as bytes]
+            [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.endpoint :as endpoint]
             [dk.simongray.indieauth.fetch :as fetch]
             [dk.simongray.indieauth.grant :as grant]
@@ -312,7 +312,7 @@
       (let [code    (indieauth/token)
             granted (grant/granted-scopes request scopes)
             shared  (grant/granted-profile profile granted)]
-        (async/then ((:put! codes) (bytes/hash-text code)
+        (async/then ((:put! codes) (digest/text code)
                                    (cond-> {:client-id      (:client-id request)
                                             :redirect-uri   (:redirect-uri request)
                                             :code-challenge (:code-challenge request)
