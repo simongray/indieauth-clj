@@ -42,6 +42,10 @@
         (is (nil? (signed/unsign secret-text :state x later 600)) (pr-str x)))))
   (testing "a secret of fewer than 32 bytes"
     (is (thrown? #?(:clj Exception :cljs :default) (signed/sign "short" :state {} noon))))
+  (testing "now, by default"
+    (let [s (signed/sign secret-text :comment {:path "/a-post"})]
+      (is (= {:path "/a-post"} (signed/unsign secret-text :comment s 1800)))
+      (is (nil? (signed/unsign secret-text :state s 1800)) "of another kind")))
   (testing "a text derived from another"
     (is (= (signed/derive-text secret-text "code_verifier" "a")
            (signed/derive-text secret-text "code_verifier" "a")))
