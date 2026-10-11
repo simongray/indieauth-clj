@@ -290,7 +290,10 @@
                    (indieauth/authorization-request discovery (assoc client :scope ["email"])))
           "email without profile")
       (is (thrown? #?(:clj Exception :cljs :default)
-                   (indieauth/authorization-request discovery (assoc client :scope "a\\b")))))
+                   (indieauth/authorization-request discovery (assoc client :scope "a\\b"))))
+      (is (thrown? #?(:clj Exception :cljs :default)
+                   (indieauth/authorization-request discovery (assoc client :scope ["a\\b"])))
+          "in a collection too"))
     (testing "the session"
       (is (= (merge (dissoc discovery :urls) client
                     {:urls  ["https://user.example/"]

@@ -498,7 +498,7 @@
   [{:keys [me authorization-endpoint token-endpoint] :as discovery}
    {:keys [client-id redirect-uri scope secret] :as opts}]
   (let [{:keys [now-fn]} (merge default-options opts)
-        scopes           (if (string? scope) (scopes scope) (vec (distinct scope)))]
+        scopes           (scopes (if (string? scope) scope (str/join " " scope)))]
     (when-let [problem (request-problem client-id redirect-uri scopes)]
       (throw (ex-info problem {:client-id    client-id
                                :redirect-uri redirect-uri

@@ -9,7 +9,8 @@
   consent page with what consent gives. Then approve! checks the answer
   and gives the client its code. Codes and tokens are kept in stores of
   yours, maps of a few functions, or in memory-store, and only their
-  hashes are kept.
+  hashes are kept. In ClojureScript, the handlers answer with promises,
+  and a server gives them a body that it has read.
 
   The code follows the IndieAuth Living Standard of 11 July 2024 at
   https://indieauth.spec.indieweb.org/ and cites its sections."
