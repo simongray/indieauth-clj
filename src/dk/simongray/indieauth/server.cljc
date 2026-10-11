@@ -353,6 +353,9 @@
                  (fn [response]
                    (update response :headers #(merge page-headers %)))))))
 
+;; TODO: email magic links to a rel=me mailto: address, as a way to sign in
+;; for :authorize, perhaps in relmeauth-clj, with a limit on mail to each
+;; address
 (defn handler
   "A Ring handler for the authorization endpoint, by `opts`.
 
@@ -385,6 +388,9 @@
                    :post    #(endpoint/form-response % (fn [fields] (endpoint/profile-response fields opts)) opts)
                    :options (constantly ring/preflight)})))
 
+;; TODO: Ticket Auth, https://indieweb.org/IndieAuth_Ticket_Auth, so that a
+;; friend's reader gets a token for private posts: a ticket grant here, and
+;; a handler for a ticket endpoint
 (defn token-handler
   "A Ring handler for the token endpoint, by the `opts` of handler.
 
