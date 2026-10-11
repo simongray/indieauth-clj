@@ -9,9 +9,11 @@
             [dk.simongray.indieauth.json :as json]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
+            [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.wary-fetch.url :as url])
   #?(:clj (:import [com.sun.net.httpserver HttpExchange HttpHandler HttpServer]
-                   [java.net InetSocketAddress])))
+                   [java.net InetSocketAddress]
+                   [java.util.concurrent Executors])))
 
 (defn run
   "Run the steps `fs` one after another as a test on either platform. Each
@@ -163,8 +165,44 @@
                                        (if h
                                          (h request)
                                          {:status 404 :headers {} :body ""}))))))
+       ;; a thread for each exchange, since a handler can send a request
+       ;; to the same server
+       (.setExecutor server (Executors/newCachedThreadPool))
        (.start server)
        (try
          (f (str "http://127.0.0.1:" (.getPort (.getAddress server))))
          (finally
            (.stop server 0))))))
+
+#?(:clj
+   (defn- forwarder
+     "A Ring handler that sends each request on over HTTP to the server at
+     `base`, under the path of its `host`, and answers with its response."
+     [base host]
+     (fn [{:keys [request-method uri query-string body] :as request}]
+       (let [r (http/send! {:method        request-method
+                            :url           (str base "/" host uri
+                                                (some->> query-string (str "?")))
+                            :headers       (dissoc (:headers request) "host" "content-length")
+                            :body          body
+                            :max-redirects 0
+                            :allow-pred    (constantly true)})]
+         {:status  (:status r)
+          :headers (into {} (for [k (keys (:headers r))]
+                              [k (headers/joined (:headers r) k)]))
+          :body    (:body r)}))))
+
+#?(:clj
+   (defn on-localhost
+     "Call `f` with `routes`, a map of URLs to Ring handlers, whose handlers
+     send each request over HTTP to a server on localhost that runs the
+     handler of its URL. So the requests of a test go over real HTTP, with
+     the URLs of the sites of the test."
+     [routes f]
+     (let [local (into {} (for [[u h] routes
+                                :let  [{:keys [authority path]} (indieauth/url-parts u)]]
+                            [(str "/" authority (if (empty? path) "/" path)) h]))]
+       (with-server local
+         (fn [base]
+           (f (into {} (for [u (keys routes)]
+                         [u (forwarder base (:authority (indieauth/url-parts u)))]))))))))
