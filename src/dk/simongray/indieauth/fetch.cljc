@@ -10,7 +10,8 @@
             [dk.simongray.wary-fetch.async :as async]
             [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.wary-fetch.json :as json]
-            [dk.simongray.wary-fetch.url :as url]))
+            [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.whatwg-mime :as mime]))
 
 (defn failure
   "A map of the :error of `type`, a keyword, with the `reason` and the facts
@@ -81,7 +82,7 @@
   "The HTML of the page in the `response`, or nil when it holds another
   kind of document."
   [{:keys [headers body] :as response}]
-  (let [type (headers/media-type (headers/header headers "content-type"))]
+  (let [type (mime/essence (mime/extract (get headers "content-type")))]
     (when (and (string? body)
                (contains? #{nil "text/html" "application/xhtml+xml"} type))
       body)))

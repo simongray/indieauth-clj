@@ -24,9 +24,9 @@
             [dk.simongray.indieauth.signed :as signed]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.headers :as headers]
             [dk.simongray.wary-fetch.json :as json]
-            [dk.simongray.wary-fetch.url :as url]))
+            [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.whatwg-mime :as mime]))
 
 (def default-options
   "The default of each option of a server that has one, which follows
@@ -137,14 +137,14 @@
 
   A document that names another client gives the :client-id alone."
   [client-id {:keys [headers body] :as response}]
-  (let [type (headers/media-type (headers/header headers "content-type"))
-        m    (when (or (nil? type) (re-find #"^application/(.+\+)?json$" type))
+  (let [type (mime/extract (get headers "content-type"))
+        m    (when (or (nil? type) (mime/json? type))
                (fetch/json-object body))]
     (cond
       m
       (or (info/document-info client-id m) (info/unknown-client client-id))
 
-      (and (string? body) (contains? #{nil "text/html" "application/xhtml+xml"} type))
+      (and (string? body) (contains? #{nil "text/html" "application/xhtml+xml"} (mime/essence type)))
       (info/app-info client-id response)
 
       :else
