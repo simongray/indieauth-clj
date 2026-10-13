@@ -11,14 +11,15 @@
   texts, keywords, numbers and instants."
   (:require #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
             [dk.simongray.indieauth.instant :as instant]
-            [dk.simongray.wary-fetch.bytes :as bytes]
-            [dk.simongray.wary-fetch.secret :as secret]))
+            [dk.simongray.wary-fetch.secret :as secret]
+            [dk.simongray.webcrypto.bytes :as bytes]
+            [dk.simongray.webcrypto.hash :as hash]))
 
 (defn- key-bytes
   "The bytes of the text `secret`, which can be a hidden text, or a throw
   when it has fewer than 32 bytes."
   [secret]
-  (let [b (bytes/encode (secret/reveal secret))]
+  (let [b (bytes/encode (str (secret/reveal secret)))]
     (when (< (bytes/length b) 32)
       (throw (ex-info "A secret has 32 bytes at least, e.g. a token" {})))
     b))
@@ -26,7 +27,7 @@
 (defn- signature
   "The signature of the text `s` with the `secret`, as bytes."
   [secret s]
-  (bytes/hmac :sha256 (key-bytes secret) (bytes/encode s)))
+  (hash/hmac :sha-256 (key-bytes secret) (bytes/encode s)))
 
 (defn- edn-text
   "The value `x` as EDN, printed in full."
@@ -57,7 +58,7 @@
   vector, or nil when it holds none."
   [payload]
   (try
-    (let [[kind at m :as x] (some-> (bytes/unbase64url payload)
+    (let [[kind at m :as x] (some-> (bytes/from-base64url payload)
                                     bytes/decode
                                     edn/read-string)]
       (when (and (vector? x) (keyword? kind) (int? at) (map? m))
@@ -78,7 +79,7 @@
    (when-let [[_ payload sig] (and (string? s)
                                    (re-matches #"([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)"
                                                s))]
-     (let [given (bytes/unbase64url sig)]
+     (let [given (bytes/from-base64url sig)]
        ;; only a map that the secret signed is read
        (when (and given (bytes/same? (signature secret payload) given))
          (let [[signed-kind signed-at m] (payload-value payload)]

@@ -10,7 +10,7 @@
             [dk.simongray.indieauth.digest :as digest]
             [dk.simongray.indieauth.instant :as instant]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]))
+            [dk.simongray.webcrypto.bytes :as bytes]))
 
 (defn- each!
   "Call `f` on each of `xs` in turn, after what the call before gives, a

@@ -232,8 +232,9 @@ Principles
   JSON documents keep its names, e.g. `:access_token`. Every function
   that sends takes a `:send` of your own.
 - **One codebase.** The library is written in `.cljc` and depends on
-  [wary-fetch](https://github.com/simongray/wary-fetch) for requests,
-  bytes and JSON,
+  [wary-fetch](https://github.com/simongray/wary-fetch) for requests and
+  JSON, [webcrypto-clj](https://github.com/simongray/webcrypto-clj) for
+  bytes, digests and signatures,
   [html-pieces](https://github.com/simongray/html-pieces) for pages and
   [microformats-clj](https://github.com/simongray/microformats-clj) for
   h-cards and h-apps.

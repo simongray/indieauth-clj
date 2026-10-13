@@ -20,9 +20,10 @@
             [dk.simongray.indieauth.state :as state]
             [dk.simongray.wary-fetch :as http]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.json :as json]
-            [dk.simongray.wary-fetch.url :as url]))
+            [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.webcrypto :as webcrypto]
+            [dk.simongray.webcrypto.bytes :as bytes]))
 
 ;;; identifiers
 
@@ -125,7 +126,7 @@
   ([]
    (token 32))
   ([n]
-   (bytes/base64url (bytes/random n))))
+   (bytes/base64url (webcrypto/random-bytes n))))
 
 ;; IndieAuth 5.2; RFC 7636, section 4.1
 (defn code-verifier

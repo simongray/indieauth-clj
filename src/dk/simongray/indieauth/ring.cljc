@@ -2,9 +2,9 @@
   "The Ring requests that the endpoints take, and the answers they give."
   (:require [clojure.string :as str]
             #?(:clj [dk.simongray.wary-fetch.async :as async])
-            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.json :as json]
-            [dk.simongray.wary-fetch.url :as url])
+            [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.webcrypto.bytes :as bytes])
   #?(:clj (:import [java.io InputStream])))
 
 (defn body-bytes

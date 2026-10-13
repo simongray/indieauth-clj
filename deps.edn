@@ -1,14 +1,16 @@
 {:paths ["src"]
 
  ;; Clojure 1.11 is the floor, and the tests run on it unless an alias says
- ;; otherwise. wary-fetch sends the requests and has the bytes and JSON,
- ;; html-pieces parses a page once, and microformats-clj reads its h-card or
- ;; h-app. whatwg-mime reads the Content-Type of a response.
+ ;; otherwise. wary-fetch sends the requests and has the JSON, webcrypto-clj
+ ;; has the bytes, digests and HMACs, html-pieces parses a page once, and
+ ;; microformats-clj reads its h-card or h-app. whatwg-mime reads the
+ ;; Content-Type of a response.
  :deps  {org.clojure/clojure           {:mvn/version "1.11.4"}
-         dk.simongray/wary-fetch       {:mvn/version "0.3.0"}
+         dk.simongray/wary-fetch       {:mvn/version "0.11.0"}
+         dk.simongray/webcrypto-clj    {:mvn/version "0.1.0"}
          dk.simongray/html-pieces      {:mvn/version "0.4.1"}
          dk.simongray/microformats-clj {:mvn/version "0.2.0"}
-         dk.simongray/whatwg-mime      {:mvn/version "0.1.0"}}
+         dk.simongray/whatwg-mime      {:mvn/version "0.2.1"}}
 
  :aliases
  {;; clojure -X:test

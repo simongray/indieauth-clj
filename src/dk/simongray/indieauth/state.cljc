@@ -9,7 +9,8 @@
   :dk.simongray.indieauth/session, so that under a shared secret the
   cookie of one protocol never passes for that of another."
   (:require [dk.simongray.indieauth.signed :as signed]
-            [dk.simongray.wary-fetch.bytes :as bytes]))
+            [dk.simongray.webcrypto :as webcrypto]
+            [dk.simongray.webcrypto.bytes :as bytes]))
 
 ;; RFC 6265, section 6.1: a browser keeps a cookie of 4096 bytes at least
 (def max-cookie-bytes
@@ -20,7 +21,7 @@
 (defn- random-text
   "A text of 32 random bytes in the URL-safe letters of base64."
   []
-  (bytes/base64url (bytes/random 32)))
+  (bytes/base64url (webcrypto/random-bytes 32)))
 
 (defn- verifier
   "The PKCE code verifier of the `state`, which only the `secret` gives."

@@ -9,8 +9,8 @@
             [dk.simongray.indieauth.resource :as resource]
             [dk.simongray.indieauth.ring :as ring]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
-            [dk.simongray.wary-fetch.secret :as secret]))
+            [dk.simongray.wary-fetch.secret :as secret]
+            [dk.simongray.webcrypto.bytes :as bytes]))
 
 (defn error-response
   "The Ring response of an OAuth 2.0 `error`, a map of the :code and the

@@ -14,9 +14,9 @@
             [dk.simongray.indieauth.server :as server]
             [dk.simongray.indieauth.test-support :as t :refer [run]]
             [dk.simongray.wary-fetch.async :as async]
-            [dk.simongray.wary-fetch.bytes :as bytes]
             [dk.simongray.wary-fetch.json :as json]
-            [dk.simongray.wary-fetch.url :as url]))
+            [dk.simongray.wary-fetch.url :as url]
+            [dk.simongray.webcrypto.bytes :as bytes]))
 
 (def verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
 (def challenge "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
