@@ -39,7 +39,7 @@ from [Clojars](https://clojars.org/dk.simongray/indieauth-clj) to the
 `:deps` in your `deps.edn`:
 
 ```clojure
-dk.simongray/indieauth-clj {:mvn/version "0.3.0"}
+dk.simongray/indieauth-clj {:mvn/version "0.3.1"}
 ```
 
 For changes that aren't released yet, use the SHA of the latest commit on

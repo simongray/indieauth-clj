@@ -6,7 +6,7 @@
  ;; microformats-clj reads its h-card or h-app. whatwg-mime reads the
  ;; Content-Type of a response.
  :deps  {org.clojure/clojure           {:mvn/version "1.11.4"}
-         dk.simongray/wary-fetch       {:mvn/version "0.11.0"}
+         dk.simongray/wary-fetch       {:mvn/version "0.14.1"}
          dk.simongray/webcrypto-clj    {:mvn/version "0.1.0"}
          dk.simongray/html-pieces      {:mvn/version "0.4.1"}
          dk.simongray/microformats-clj {:mvn/version "0.2.0"}
